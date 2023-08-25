@@ -1,0 +1,28 @@
+[package]
+name = "dotroot"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.75"
+dialoguer = "0.10.4"
+env_logger = "0.10.0"
+globset = "0.4.13"
+itertools = "0.11.0"
+log = "0.4.20"
+mlua = { version = "0.9.0", features = ["luajit52", "vendored"] }
+rayon = "1.7.0"
+sha2 = "0.10.7"
+walkdir = "2.3.3"
+
+[profile.release]
+strip = true  # Automatically strip symbols from the binary.
+opt-level = "z"  # Optimize for size.
+lto = true
+codegen-units = 1
+
+[dev-dependencies]
+ctor = "0.2.4"
+tempfile = "3.8.0"
