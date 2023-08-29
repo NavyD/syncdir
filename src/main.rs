@@ -11,14 +11,11 @@ use dialoguer::{theme::ColorfulTheme, Confirm};
 use dotroot::{config::LastDestinationConfig, util};
 use itertools::Itertools;
 use log::{debug, info, log_enabled, trace, warn};
-use mlua::prelude::*;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-fn main() -> LuaResult<()> {
-    Ok(())
-}
+fn main() {}
 
 #[derive(Debug, Clone, Builder)]
 pub struct DotRoot {
@@ -408,7 +405,7 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     use uuid::Uuid;
 
-    use std::sync::Once;
+    use std::{os::unix::prelude::PermissionsExt, sync::Once};
 
     use log::LevelFilter;
 
@@ -588,42 +585,53 @@ mod tests {
     }
 
     #[rstest]
-    // 无扩展名的作为dir处理
-    #[case::error_at_first(&["a", "b/c/2.txt", "a/b"], &[])]
+    #[case::error_at_first(&["a/b/c", "c/1.txt", "d"], &[])]
     #[case::error_util_first_dir(&["a/1.txt", "b/c/2.txt", "a/b/c", "3.txt", "a/e"], &["a/1.txt", "b/c/2.txt"])]
-    fn test_remove_src_dsts_error_when_exists_dirs<P>(
+    /// 最深的dir 最浅的file作为无权限处理
+    fn test_remove_src_dsts_error_when_no_perms_dir(
         tmp_dotroot: DotRoot,
-        #[case] srcs: &[P],
-        #[case] expects: &[P],
-    ) -> Result<()>
-    where
-        P: AsRef<Path> + Debug,
-    {
-        let f = |p: &P| (tmp_dotroot.src.join(p), tmp_dotroot.dst.join(p));
-        let src_dsts = srcs.iter().map(f).collect_vec();
-        for (src, dst) in &src_dsts {
-            if src.extension().is_some() {
-                if let Some(p) = src.parent() {
-                    fs::create_dir_all(p)?;
-                }
-                if let Some(p) = dst.parent() {
-                    fs::create_dir_all(p)?;
-                }
-                fs::write(src, Words(3..10).fake::<Vec<String>>().join(" "))?;
-                fs::write(dst, Words(3..10).fake::<Vec<String>>().join(" "))?;
-            } else {
-                fs::create_dir_all(src)?;
-                fs::create_dir_all(dst)?;
-            }
-        }
+        #[case] srcs: &[&str],
+        #[case] expect: &[&str],
+    ) -> Result<()> {
+        let mut created_srcs =
+            create_random_files(&tmp_dotroot.src.to_str().unwrap(), srcs).unwrap();
+        created_srcs.sort_by_cached_key(|p| -(p.ancestors().count() as isize));
+
+        // 最深的dir
+        let no_perm_dir = created_srcs.iter().find(|p| p.is_dir()).unwrap();
+        let mut perm = no_perm_dir.metadata().unwrap().permissions();
+        info!(
+            "setting up dir {} from mod {:o} to no perms",
+            no_perm_dir.display(),
+            perm.mode(),
+        );
+        perm.set_mode(0o000);
+        fs::set_permissions(no_perm_dir, perm).unwrap();
+
+        // 最浅的file
+        let no_perm_file = created_srcs.iter().rev().find(|p| p.is_file()).unwrap();
+        let mut perm = no_perm_file.metadata().unwrap().permissions();
+        info!(
+            "setting up file {} from mod {:o} to no perms",
+            no_perm_dir.display(),
+            perm.mode(),
+        );
+        perm.set_mode(0o000);
+        fs::set_permissions(no_perm_file, perm).unwrap();
+
+        let src_dst_convert = |p| (tmp_dotroot.src.join(p), tmp_dotroot.dst.join(p));
+        let src_dsts = srcs.iter().map(src_dst_convert).collect_vec();
         let res = tmp_dotroot.remove_src_dsts(src_dsts);
-        debug!("remove result: {:?}", res);
+
         assert!(res.is_err());
         let e = res.err().unwrap();
         assert!(e.to_string().contains("Failed to remove src"));
         assert!(e.is::<DotRootRemovedError>());
         let re = e.downcast_ref::<DotRootRemovedError>().unwrap();
-        assert_eq!(re.src_dsts, expects.iter().map(f).collect_vec());
+        assert_eq!(
+            re.src_dsts,
+            expect.iter().map(src_dst_convert).collect_vec()
+        );
         Ok(())
     }
 

@@ -13,7 +13,7 @@ env_logger = "0.10.0"
 globset = "0.4.13"
 itertools = "0.11.0"
 log = "0.4.20"
-mlua = { version = "0.9.0", features = ["luajit52", "vendored"] }
+# mlua = { version = "0.9.0", features = ["luajit52", "vendored"] }
 rayon = "1.7.0"
 sha2 = "0.10.7"
 walkdir = "2.3.3"
