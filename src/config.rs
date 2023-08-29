@@ -1,12 +1,11 @@
 use std::io::prelude::*;
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, BufWriter, Cursor},
-    iter,
+    io::{BufRead, BufReader, BufWriter},
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Error, Result};
+use anyhow::Result;
 use derive_builder::Builder;
 use log::{debug, info, trace, warn};
 
@@ -88,7 +87,7 @@ impl LastDestinationConfig {
 
 #[cfg(test)]
 mod tests {
-    use fake::{faker::lorem::en::Words, Fake};
+
     use rstest::rstest;
     use tempfile::tempdir;
 

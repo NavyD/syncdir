@@ -1,9 +1,7 @@
 use std::{
     collections::HashSet,
     fmt::{Debug, Display},
-    fs::{self, File},
-    hash::Hash,
-    io::{self, prelude::*, BufReader},
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -12,7 +10,7 @@ use derive_builder::Builder;
 use dialoguer::{theme::ColorfulTheme, Confirm};
 use dotroot::{config::LastDestinationConfig, util};
 use itertools::Itertools;
-use log::{debug, error, info, log_enabled, trace, warn};
+use log::{debug, info, log_enabled, trace, warn};
 use mlua::prelude::*;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -20,11 +18,6 @@ use walkdir::WalkDir;
 
 fn main() -> LuaResult<()> {
     Ok(())
-}
-
-struct Config {
-    last_path: PathBuf,
-    non_interactive: bool,
 }
 
 #[derive(Debug, Clone, Builder)]
