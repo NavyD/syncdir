@@ -76,6 +76,14 @@ impl DotRoot {
     where
         P: AsRef<Path>,
     {
+        if log_enabled!(log::Level::Info) {
+            let mut s = target_srcs.iter().map(|p| p.as_ref().display()).join(", ");
+            if s.is_empty() {
+                s = "[]".to_string();
+            }
+            info!("Cleaning in {} targets: {}", target_srcs.len(), s);
+        }
+
         // let mut target_srcs = target_srcs.into_iter();
         // 0. read last dsts from file
         let last_dsts = self.last_dsts_conf.load_last_dsts()?;
@@ -88,33 +96,35 @@ impl DotRoot {
         // 2. find removable srcs and dsts
         let removables = self
             .find_removable_src_dsts_iter(&curr_srcs, &last_dsts)?
-            .filter(|(src, _)| {
-                target_srcs.is_empty() || target_srcs.iter().any(|p| src.starts_with(p))
+            .filter(|(_, dst)| {
+                target_srcs.is_empty() || target_srcs.iter().any(|p| dst.starts_with(p))
             });
 
         // 3. remove dirs. if error then save lasts and reerror
         let get_new_last_dsts = |removeds: &[PathBuf]| {
+            debug!("Getting new last dsts from {} curr srcs", curr_srcs.len());
             let mut dsts = curr_srcs
                 .iter()
                 .map(|p| self.get_dst_path(p))
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<HashSet<_>>>()?;
+            debug!(
+                "Extending {} last dsts by filter {} removeds",
+                last_dsts.len(),
+                removeds.len()
+            );
             dsts.extend(
                 last_dsts
                     .iter()
-                    .filter(|p| removeds.contains(p))
+                    .filter(|p| !removeds.contains(p))
                     .map(|p| p.to_path_buf()),
             );
+            trace!("Got {} new last dsts: {:?}", dsts.len(), dsts);
             Ok::<_, Error>(dsts)
         };
         let new_last_dsts = match self.remove_src_dsts(removables) {
-            Ok(removeds) => {
-                if log_enabled!(log::Level::Trace) {
-                    trace!("Removed {} paths: {:?}", removeds.len(), removeds);
-                }
-                get_new_last_dsts(
-                    &(removeds.into_iter().unzip() as (Vec<PathBuf>, Vec<PathBuf>)).1,
-                )?
-            }
+            Ok(removeds) => get_new_last_dsts(
+                &(removeds.into_iter().unzip() as (Vec<PathBuf>, Vec<PathBuf>)).1,
+            )?,
             Err(mut e) => {
                 let errstr = e.to_string();
                 if let Some(removed) = e.downcast_mut::<DotRootRemovedError>() {
@@ -131,16 +141,6 @@ impl DotRoot {
                 return Err(e);
             }
         };
-
-        info!("Cleaning empty dirs in {}", self.dst.display());
-        for res in WalkDir::new(&self.dst).contents_first(true) {
-            let e = res?;
-            let p = e.path();
-            if p.is_dir() && p.read_dir()?.next().is_none() {
-                trace!("Removing empty dir {}", p.display());
-                fs::remove_dir(p)?;
-            }
-        }
 
         // 4. update dirs to file
         self.last_dsts_conf.save_last_dsts(&new_last_dsts)?;
@@ -170,13 +170,45 @@ impl DotRoot {
     fn remove_src_dsts<T, P>(&self, src_dsts: T) -> Result<Vec<(P, P)>>
     where
         T: IntoIterator<Item = (P, P)>,
-        P: AsRef<Path> + Debug,
+        P: AsRef<Path> + Debug + Clone,
     {
         let (mut removeds, mut skippeds) = (vec![], vec![]);
         let src_dsts = src_dsts.into_iter().collect_vec();
-        trace!("Removing {} src dsts: {:?}", src_dsts.len(), src_dsts);
+        debug!(
+            "Trying to remove {} src dsts: {:?}",
+            src_dsts.len(),
+            src_dsts
+        );
 
         for (src, dst) in src_dsts {
+            let (srcf, dstf) = (src.as_ref(), dst.as_ref());
+            let removed = confirm_rm(srcf, dstf, self.non_interactive).with_context(|| {
+                DotRootRemovedError {
+                    desc: format!(
+                        "Failed to remove src {} and dst {}",
+                        srcf.display(),
+                        dstf.display()
+                    ),
+                    src_dsts: removeds
+                        .iter()
+                        .map(|(s, d): &(P, P)| (s.as_ref().to_path_buf(), d.as_ref().to_path_buf()))
+                        .collect_vec(),
+                }
+            })?;
+            // if rm(src.as_ref(), dst.as_ref())? {
+            if removed {
+                &mut removeds
+            } else {
+                &mut skippeds
+            }
+            .push((src, dst));
+        }
+
+        skippeds.sort_by_cached_key(|(src, _)| -(src.as_ref().ancestors().count() as isize));
+        info!("Cleaning empty dirs in {} skippeds", skippeds.len());
+        // skippeds.into_iter().map(|(src, dst)| rm(src, dst)).collect::<Result<Vec<_>>>();
+        let mut new_skippeds = vec![];
+        for (src, dst) in skippeds {
             let (srcf, dstf) = (src.as_ref(), dst.as_ref());
             let removed = confirm_rm(srcf, dstf, self.non_interactive).with_context(|| {
                 DotRootRemovedError {
@@ -194,17 +226,17 @@ impl DotRoot {
             if removed {
                 &mut removeds
             } else {
-                &mut skippeds
+                &mut new_skippeds
             }
             .push((src, dst));
         }
 
-        debug!(
+        trace!(
             "Removed a total of {} files: {:?}. and skipped {} files: {:?}",
             removeds.len(),
             removeds,
-            skippeds.len(),
-            skippeds,
+            new_skippeds.len(),
+            new_skippeds,
         );
 
         Ok(removeds)
@@ -260,15 +292,8 @@ impl DotRoot {
         T: IntoIterator<Item = &'a P> + Clone,
         P: AsRef<Path> + Clone + Debug + 'a,
     {
-        let curr_srcs = curr_srcs.into_iter().collect_vec();
+        let curr_srcs: Vec<&P> = curr_srcs.into_iter().collect_vec();
         let last_dsts: Vec<&P> = last_dsts.into_iter().collect_vec();
-        trace!(
-            "Finding removable paths in {} curr_srcs: {:?}, {} last_dsts: {:?}",
-            curr_srcs.len(),
-            curr_srcs,
-            last_dsts.len(),
-            last_dsts
-        );
 
         if let Some(p) = curr_srcs
             .iter()
@@ -278,24 +303,30 @@ impl DotRoot {
             bail!("Found non absolute path {}", p.as_ref().display())
         }
 
-        let curr_srcs = curr_srcs
-            .into_iter()
-            .map(AsRef::as_ref)
-            .collect::<HashSet<_>>();
-
-        last_dsts
+        let last_srcs = last_dsts
             .into_iter()
             // last dst to last src
             .map(|dst| {
                 self.get_src_path(dst.as_ref())
                     .map(|src| (src, dst.clone()))
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map(move |paths| {
-                dbg!(paths)
-                    .into_iter()
-                    .filter(move |(src, _)| !curr_srcs.contains(src.as_path()))
-            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let curr_srcs = curr_srcs
+            .into_iter()
+            .map(AsRef::as_ref)
+            .collect::<HashSet<_>>();
+        if log_enabled!(log::Level::Trace) {
+            trace!(
+                "Finding removable {} last srcs: [{}]. if not contains in {} curr srcs: {:?}",
+                last_srcs.len(),
+                last_srcs.iter().map(|v| v.0.display()).join(","),
+                curr_srcs.len(),
+                curr_srcs
+            );
+        }
+        Ok(last_srcs
+            .into_iter()
+            .filter(move |(src, _)| !curr_srcs.contains(src.as_path())))
     }
 }
 
@@ -596,6 +627,8 @@ mod tests {
         Ok(())
     }
 
+    /// 创建随机的内容到文件中，paths使用相对pp的路径表示，有后缀名的作为
+    /// 文件处理，否则将path创建为目录
     fn create_random_files<P>(pp: &P, paths: &[P]) -> Result<Vec<PathBuf>>
     where
         P: AsRef<Path> + Debug,
@@ -633,39 +666,48 @@ mod tests {
     #[case::only_files_in_targets(&["a/b/1.txt", "c/2.t", "3.t"], &["c"])]
     fn test_clean_when_no_last_dsts(
         tmp_dotroot: DotRoot,
-        #[case] src_paths: &[&str],
+        #[case] srcs: &[&str],
         #[case] target_srcs: &[&str],
     ) {
-        create_random_files(&tmp_dotroot.src.to_str().unwrap(), src_paths).unwrap();
+        // pre setup
+        create_random_files(&tmp_dotroot.src.to_str().unwrap(), srcs).unwrap();
+        let target_src_paths = target_srcs
+            .iter()
+            .map(|s| tmp_dotroot.dst.join(s))
+            .collect_vec();
 
-        tmp_dotroot.clean(target_srcs).unwrap();
+        tmp_dotroot.clean(&target_src_paths).unwrap();
 
-        let last_dsts = tmp_dotroot.last_dsts_conf.load_last_dsts().unwrap();
-        let expect = src_paths
+        let expect_last_dsts = srcs
             .iter()
             // 获取所有唯一的子路径
             .flat_map(|p| Path::new(p).ancestors())
-            .unique()
             // 当pop到顶时 过滤空str的路径 即不保存src/dst当前路径
             .filter(|p| !p.to_str().unwrap().is_empty())
-            // 过滤掉从targets中
-            .filter(|p| target_srcs.is_empty() || target_srcs.iter().any(|t| p.starts_with(t)))
+            .unique()
+            // 获取srcs对应的last_dsts 用于检查对应的dsts是否被移除
+            .map(|p| tmp_dotroot.dst.join(p))
             .sorted()
             .collect_vec();
-        let last_dsts_sorted = last_dsts
-            .iter()
-            // 移除前缀与src_paths比较
-            .map(|p| p.strip_prefix(&tmp_dotroot.dst).unwrap())
-            // 过滤掉从targets中
-            .filter(|p| target_srcs.is_empty() || target_srcs.iter().any(|t| p.starts_with(t)))
-            .sorted()
-            .collect_vec();
-        assert_eq!(last_dsts_sorted, expect);
+        let new_last_dsts = tmp_dotroot.last_dsts_conf.load_last_dsts().unwrap();
+
+        assert_eq!(
+            new_last_dsts.into_iter().sorted().collect_vec(),
+            expect_last_dsts
+        );
     }
 
     #[rstest]
-    #[case::empty(&[] as &[&str], &["a/b/1.t"], &[])]
-    #[case::sames(&["a/b/1.t"], &["a/b/1.t"], &[])]
+    #[case::empty_srcs(&[] as &[&str], &["a/b/1.t", "c/2.t", "d/e"], &[])]
+    #[case::empty_last_dsts(&["a/b/1.t"], &[], &[])]
+    #[case::sames(&["a/b/1.t", "c"], &["a/b/1.t", "c"], &[])]
+    #[case::last_dsts_not_contains_some_srcs(&["a/b/1.t", "c", "d/2.t"], &["a/b/1.t"], &[])]
+    #[case::srcs_not_contains_some_last_dsts(&["a/b/1.t"], &["a/b/1.t", "c", "d/2.t"], &[])]
+    #[case::srcs_not_contains_some_last_dsts_in_targets(&["a/b/1.t"], &["a/b/1.t", "c", "d/2.t"], &["a/b", "c"])]
+    #[case::last_dsts_not_contains_some_srcs_in_targets(&["a/b/1.t", "c", "d/2.t"], &["a/b/1.t"], &["a/b", "d"])]
+    #[case::sames_in_targets(&["a/b/1.t", "c"], &["a/b/1.t", "c"], &["a/b", "c"])]
+    #[case::empty_last_dsts_in_targets(&["a/b/1.t", "c/2.t", "d/e"], &[], &["a/b", "c"])]
+    #[case::empty_srcs_in_targets(&[] as &[&str], &["a/b/1.t", "c/2.t", "d/e"], &["a/b", "d"])]
     fn test_clean_when_last_dsts(
         tmp_dotroot: DotRoot,
         #[case] srcs: &[&str],
@@ -674,6 +716,7 @@ mod tests {
     ) {
         create_random_files(&tmp_dotroot.src.to_str().unwrap(), srcs).unwrap();
         create_random_files(&tmp_dotroot.dst.to_str().unwrap(), last_dsts).unwrap();
+
         let last_dst_paths = last_dsts
             .iter()
             .flat_map(|p| Path::new(p).ancestors())
@@ -682,61 +725,68 @@ mod tests {
             // 绝对路径用于检查是否存在
             .map(|p| tmp_dotroot.dst.join(p))
             .collect::<HashSet<_>>();
+        let target_src_paths = target_srcs
+            .iter()
+            .map(|s| tmp_dotroot.dst.join(s))
+            .collect_vec();
 
+        // pre setup last_dsts to load
         tmp_dotroot
             .last_dsts_conf
             .save_last_dsts(&last_dst_paths)
             .unwrap();
+        tmp_dotroot.clean(&target_src_paths).unwrap();
 
-        tmp_dotroot.clean(target_srcs).unwrap();
-
-        let src_paths = srcs
+        let src_mapped_dst_paths = srcs
             .iter()
             // 获取所有唯一的子路径
             .flat_map(|p| Path::new(p).ancestors())
             // 当pop到顶时 过滤空str的路径 即不保存src/dst当前路径
             .filter(|p| !p.to_str().unwrap().is_empty())
+            // 获取srcs对应的last_dsts 用于检查对应的dsts是否被移除
             .map(|p| tmp_dotroot.dst.join(p))
             .collect::<HashSet<_>>();
 
         let expect_removed = last_dst_paths
             .iter()
-            .filter(|p| !src_paths.contains(*p))
+            .filter(|p| !src_mapped_dst_paths.contains(*p))
+            .filter(|p| {
+                target_src_paths.is_empty() || target_src_paths.iter().any(|t| p.starts_with(t))
+            })
             .collect::<HashSet<_>>();
-
         for p in dbg!(&expect_removed) {
             assert!(!p.exists(), "expect non exists path {}", p.display());
         }
 
-        let expect_last_dsts = src_paths
+        // new last_dsts应该是从cur srcs中添加last dsts中跳过的部分
+        let expect_last_dsts = src_mapped_dst_paths
             .iter()
-            .filter(|p| !expect_removed.contains(p))
+            .chain(
+                last_dst_paths
+                    .iter()
+                    .filter(|p| !expect_removed.contains(p)),
+            )
+            .unique()
+            // targets仅用于清理范围但应该保存dst所有路径防止下次更改targets意外删除文件
+            // .filter(|p| {
+            //     target_src_paths.is_empty() || target_src_paths.iter().any(|t| p.starts_with(t))
+            // })
+            .sorted()
             .collect_vec();
         for p in dbg!(&expect_last_dsts) {
-            assert!(p.exists(), "expect exists path {}", p.display());
+            assert!(
+                p.exists() ||
+                    // 由于cur srcs存在但last dsts不存在时会保存到 文件中，但不会在模拟的expect_last_dsts实际被创建
+                    tmp_dotroot.get_src_path(p).unwrap().exists(),
+                "expect exists path {}",
+                p.display()
+            );
         }
 
-        // let last_dsts = tmp_dotroot.last_dsts_conf.load_last_dsts().unwrap();
-        // // dsts 应该使用
-        // let expect_dsts = srcs
-        //     .iter()
-        //     // 获取所有唯一的子路径
-        //     .flat_map(|p| Path::new(p).ancestors())
-        //     // 当pop到顶时 过滤空str的路径 即不保存src/dst当前路径
-        //     .filter(|p| !p.to_str().unwrap().is_empty())
-        //     .unique()
-        //     // 过滤掉从targets中
-        //     .filter(|p| target_srcs.is_empty() || target_srcs.iter().any(|t| p.starts_with(t)))
-        //     .sorted()
-        //     .collect_vec();
-        // let last_dsts_sorted = last_dsts
-        //     .iter()
-        //     // 移除前缀与src_paths比较
-        //     .map(|p| p.strip_prefix(&tmp_dotroot.dst).unwrap())
-        //     // 过滤掉从targets中
-        //     .filter(|p| target_srcs.is_empty() || target_srcs.iter().any(|t| p.starts_with(t)))
-        //     .sorted()
-        //     .collect_vec();
-        // assert_eq!(expect_dsts, last_dsts_sorted);
+        let new_last_dsts = tmp_dotroot.last_dsts_conf.load_last_dsts().unwrap();
+        assert_eq!(
+            new_last_dsts.iter().sorted().collect_vec(),
+            expect_last_dsts
+        );
     }
 }
