@@ -79,16 +79,57 @@ impl Syncer {
         Ok(())
     }
 
-    pub fn apply_to_dst(&self) -> Result<()> {
+    pub fn apply_to_dst<T, P>(&self, target_dsts: T) -> Result<()>
+    where
+        T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let target_dsts = target_dsts.into_iter().collect_vec();
         WalkDir::new(&self.src).into_iter().try_for_each(|entry| {
             let entry = entry?;
-            if entry.path_is_symlink() || entry.file_type().is_file() {
-                let from = entry.path();
-                let to = self.get_dst_path(entry.path())?;
-                if !to.exists() || self.copier.has_changed(from, &to)? {
-                    self.copier.copy_file(from, &to)?;
-                }
+            let src = entry.path();
+            let dst = self.get_dst_path(src)?;
+
+            // skip non target dsts
+            if !target_dsts.is_empty() && target_dsts.iter().all(|t| !dst.starts_with(t)) {
+                trace!(
+                    "Skipped sync dst {} not in {} target dsts",
+                    dst.display(),
+                    target_dsts.len()
+                );
+                return Ok(());
             }
+            if !dst.exists() {
+                self.copier.copy(src, dst)?;
+                return Ok(());
+            }
+            if dst.is_dir() && (!src.is_file() || self.confirm_rm(&dst)?) {
+                if let Err(e) = fs::create_dir(src) {
+                    // ignore exists dir error: mkdir -p
+                    if !src.is_dir() {
+                        return Err(e.into());
+                    }
+                }
+                self.copier.copy_metadata(src, dst)?;
+                return Ok(());
+            }
+            if !src.is_dir() || self.confirm_rm(&dst)? {
+                self.copier.copy_file(src, dst)?;
+                return Ok(());
+            }
+
+            let path_ty_str = |p: &Path| {
+                p.metadata()
+                    .map(|m| format!("{:?}", m.file_type()))
+                    .unwrap_or_else(|_| "non-exists".to_string())
+            };
+            warn!(
+                "Skipped apply {} src {} to {} dst {}",
+                path_ty_str(src),
+                src.display(),
+                path_ty_str(&dst),
+                dst.display(),
+            );
             Ok::<_, Error>(())
         })?;
         Ok(())
@@ -974,5 +1015,156 @@ mod tests {
             .iter()
             .map(|dst| (sync.src.join(dst.strip_prefix(dst_dir).unwrap()), dst))
             .for_each(|(src, dst)| compare_same_dirs(src, dst));
+    }
+
+    #[test]
+    fn test_apply_to_dst_when_empty_dst() {
+        let sync = syncer();
+        let src_dir = build_tree(&sync.src).unwrap();
+        assert!(!sync.dst.exists());
+
+        sync.apply_to_dst(&[] as &[&str; 0]).unwrap();
+
+        compare_same_dirs(src_dir, &sync.dst);
+    }
+
+    #[test]
+    fn test_apply_to_dst_when_empty_dst_in_targets() {
+        let sync = syncer();
+        let src_dir = build_tree(&sync.src).unwrap();
+        assert!(!sync.dst.exists());
+
+        let fake_dsts = WalkDir::new(src_dir)
+            .min_depth(1)
+            .into_iter()
+            .map(|res| res.unwrap().into_path())
+            .map(|p| sync.get_dst_path(p).unwrap())
+            .collect_vec();
+        let srcs = WalkDir::new(src_dir)
+            .min_depth(1)
+            .into_iter()
+            .map(|res| res.unwrap().into_path())
+            .collect_vec();
+
+        let target_dsts = srcs
+            .iter()
+            .filter(|p| p.is_dir() && p.read_dir().unwrap().any(|d| d.unwrap().path().is_file()))
+            .take(1)
+            .map(|p| sync.get_dst_path(p).unwrap())
+            .collect_vec();
+        assert!(!target_dsts.is_empty());
+
+        sync.apply_to_dst(dbg!(&target_dsts)).unwrap();
+
+        fake_dsts
+            .iter()
+            // filter not in target dsts
+            .filter(|d| {
+                target_dsts
+                    .iter()
+                    .all(|t| !d.starts_with(t) && !t.starts_with(d))
+            })
+            .for_each(|dst| assert!(!dst.exists()));
+
+        target_dsts
+            .iter()
+            .map(|dst| (sync.get_src_path(dst).unwrap(), dst))
+            .for_each(|(src, dst)| compare_same_dirs(src, dst));
+    }
+
+    #[test]
+    fn test_apply_to_dst_when_sames() {
+        let sync = syncer();
+
+        let dst_dir = build_tree(&sync.dst).unwrap();
+        assert!(dst_dir.is_dir());
+        let src_dir = build_tree(&sync.src).unwrap();
+        assert!(src_dir.is_dir());
+
+        sync.apply_to_dst([] as [&str; 0]).unwrap();
+
+        compare_same_dirs(src_dir, dst_dir);
+    }
+
+    #[test]
+    fn test_apply_to_dst_when_diff_in_both() {
+        let sync = syncer();
+
+        let dst_dir = build_tree(&sync.dst).unwrap();
+        assert!(dst_dir.is_dir());
+        let src_dir = build_tree(&sync.src).unwrap();
+        assert!(src_dir.is_dir());
+
+        let mut srcs = WalkDir::new(src_dir)
+            .into_iter()
+            .map(|e| e.map(|p| p.into_path()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let rm_src_files = {
+            let mut files = vec![];
+            let mut i = 0;
+            while i < srcs.len() && files.len() < 2 {
+                if srcs[i].is_file() {
+                    fs::remove_file(&srcs[i]).unwrap();
+                    files.push(srcs.remove(i))
+                } else {
+                    i += 1;
+                }
+            }
+            files
+        };
+        let mod_src_files = srcs
+            .iter()
+            .filter(|p| p.is_file())
+            .take(2)
+            .map(|p| fs::write(p, Words(3..10).fake::<Vec<String>>().join(" ")).map(|_| p))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let mod_src_symlinks = srcs
+            .iter()
+            .filter(|p| p.is_symlink())
+            .take(1)
+            .map(|p| {
+                assert!(p.is_symlink());
+                let plink = p.read_link().unwrap();
+                let newplink = srcs.iter().find(|s| s.is_file() && **s != plink).unwrap();
+                fs::remove_file(p).unwrap();
+                debug!(
+                    "Re symlink {} from {} to {}",
+                    p.display(),
+                    plink.display(),
+                    newplink.display()
+                );
+                symlink(newplink, p).unwrap();
+                assert!(p.is_symlink());
+                p
+            })
+            .collect_vec();
+
+        let extra_dst_files =
+            create_random_files(["a/b/c/1.t", "d/e/2.t", "f/g"].map(|s| dst_dir.join(s))).unwrap();
+        extra_dst_files.iter().for_each(|p| assert!(p.exists()));
+
+        sync.apply_to_dst([] as [&str; 0]).unwrap();
+
+        // 修改的src文件 内容同步dst
+        for src in mod_src_files {
+            let dst = dst_dir.join(src.strip_prefix(src_dir).unwrap());
+            compare_same_path(src, dst);
+        }
+        // 移除的src文件不会被dst影响
+        for src in rm_src_files {
+            let dst = dst_dir.join(src.strip_prefix(src_dir).unwrap());
+            assert!(!src.exists());
+            assert!(dst.is_file());
+        }
+        // 修改的src symlink 链接path同步
+        for src in mod_src_symlinks {
+            let dst = dst_dir.join(src.strip_prefix(src_dir).unwrap());
+            assert_eq!(src.read_link().unwrap(), dst.read_link().unwrap());
+        }
+        // 保留不在src中的文件
+        extra_dst_files.iter().for_each(|p| assert!(p.exists()));
     }
 }
