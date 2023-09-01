@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fmt::{Debug, Display},
-    fs, io,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -12,7 +12,6 @@ use dotroot::{config::LastDestinationConfig, util};
 use itertools::Itertools;
 use log::{debug, info, log_enabled, trace, warn};
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 fn main() {}
@@ -26,49 +25,6 @@ pub struct DotRoot {
 }
 
 impl DotRoot {
-    pub fn sync(&self) -> Result<()> {
-        WalkDir::new(&self.src)
-            .into_iter()
-            .par_bridge()
-            .try_for_each(|entry| {
-                let e = entry?;
-                let from = e.path();
-                if from.is_file() {
-                    let to = self.get_dst_path(from)?;
-                    if !to.exists() {
-                        info!(
-                            "Removing {} for non exists {}",
-                            from.display(),
-                            to.display()
-                        );
-                        fs::remove_file(from)?;
-                    } else if self.has_changed(from, &to)? {
-                        self.copy_file(&*to, from)?;
-                    }
-                }
-                Ok::<_, Error>(())
-            })?;
-        Ok(())
-    }
-
-    pub fn apply(&self) -> Result<()> {
-        WalkDir::new(&self.src)
-            .into_iter()
-            .par_bridge()
-            .try_for_each(|entry| {
-                let e = entry?;
-                if e.path_is_symlink() || e.file_type().is_file() {
-                    let from = e.path();
-                    let to = self.get_dst_path(e.path())?;
-                    if !to.exists() || self.has_changed(from, &to)? {
-                        self.copy_file(from, &to)?;
-                    }
-                }
-                Ok::<_, Error>(())
-            })?;
-        Ok(())
-    }
-
     pub fn clean<P>(&self, target_srcs: &[P]) -> Result<()>
     where
         P: AsRef<Path>,
@@ -247,35 +203,6 @@ impl DotRoot {
 
     fn get_src_path(&self, dst_sub: impl AsRef<Path>) -> Result<PathBuf> {
         util::map_path(dst_sub.as_ref(), &self.dst, &self.src)
-    }
-
-    fn has_changed<P: AsRef<Path>>(&self, new: P, old: P) -> Result<bool> {
-        let mut hasher = Sha256::new();
-        io::copy(&mut fs::File::open(new)?, &mut hasher)?;
-        let hash_new = hasher.finalize();
-
-        let mut hasher = Sha256::new();
-        io::copy(&mut fs::File::open(old)?, &mut hasher)?;
-        let hash_old = hasher.finalize();
-        Ok(hash_new == hash_old)
-    }
-
-    fn copy_file<P: AsRef<Path>>(&self, from: P, to: P) -> Result<()> {
-        info!(
-            "Copying file {} -> {}",
-            from.as_ref().display(),
-            to.as_ref().display()
-        );
-        io::copy(
-            &mut fs::File::open(from)?,
-            &mut fs::File::options()
-                .truncate(true)
-                .create(true)
-                .write(true)
-                .open(to)?,
-        )?;
-        // TODO: rights
-        Ok(())
     }
 
     /// 比较当前src与上次的dst路径找出不再存在当前src中的last的路径，

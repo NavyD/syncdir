@@ -2,16 +2,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub fn map_path<P: AsRef<Path>>(src: P, src_prefix: P, dst_prefix: P) -> Result<PathBuf> {
-    src.as_ref()
-        .strip_prefix(&src_prefix)
-        .map(|rel| dst_prefix.as_ref().join(rel))
+pub fn map_path<P, Q, R>(src: P, src_base: Q, dst_base: R) -> Result<PathBuf>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    let (src, src_base, dst_base) = (src.as_ref(), src_base.as_ref(), dst_base.as_ref());
+    src.strip_prefix(src_base)
+        .map(|rel| dst_base.join(rel))
         .with_context(|| {
             format!(
-                "Failed to map src {} with prefix {} to {}",
-                src.as_ref().display(),
-                src_prefix.as_ref().display(),
-                dst_prefix.as_ref().display()
+                "Failed to map src {} with base {} to dst base {}",
+                src.display(),
+                src_base.display(),
+                dst_base.display()
             )
         })
 }
