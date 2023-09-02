@@ -20,7 +20,7 @@ use log::{debug, info, log_enabled, trace, warn};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::{config::LastDestinationConfig, util};
+use crate::{service::LastDestinationListService, util};
 
 /// 将src目录内容同步到dst目录中
 #[derive(Debug, Clone, Builder)]
@@ -36,7 +36,7 @@ pub struct Syncer {
     #[builder(default)]
     copier: Copier,
 
-    last_conf: LastDestinationConfig,
+    last_dsts_srv: LastDestinationListService,
 }
 
 impl Syncer {
@@ -66,7 +66,7 @@ impl Syncer {
             );
         }
 
-        let last_dsts = self.last_conf.load_last_dsts()?;
+        let last_dsts = self.last_dsts_srv.load_last_dsts()?;
         if last_dsts.is_empty() {
             return self.sync_back_with_src(&target_dsts);
         }
@@ -170,7 +170,7 @@ impl Syncer {
 
         // let mut target_srcs = target_srcs.into_iter();
         // 0. read last dsts from file
-        let last_dsts = self.last_conf.load_last_dsts()?;
+        let last_dsts = self.last_dsts_srv.load_last_dsts()?;
         trace!("Loaded {} last dsts: {:?}", last_dsts.len(), last_dsts);
 
         // 1. load cur srcs
@@ -220,14 +220,14 @@ impl Syncer {
                     let (_, dsts): (Vec<PathBuf>, Vec<PathBuf>) =
                         removed.src_dsts.drain(..).unzip();
                     let new_last_dsts = get_new_last_dsts(&dsts)?;
-                    self.last_conf.save_last_dsts(&new_last_dsts)?;
+                    self.last_dsts_srv.save_last_dsts(&new_last_dsts)?;
                 }
                 return Err(e);
             }
         };
 
         // 4. update dirs to file
-        self.last_conf.save_last_dsts(&new_last_dsts)?;
+        self.last_dsts_srv.save_last_dsts(&new_last_dsts)?;
         trace!(
             "Saved {} last dsts: {:?}",
             new_last_dsts.len(),
@@ -816,7 +816,7 @@ mod tests {
     use once_cell::sync::Lazy;
     use tempfile::{tempdir, TempDir};
 
-    use crate::config::LastDestinationConfigBuilder;
+    use crate::service::LastDestinationListServiceBuilder;
 
     use super::*;
     use std::{
@@ -1163,8 +1163,8 @@ mod tests {
             .copier(Copier {
                 ..Copier::default()
             })
-            .last_conf(
-                LastDestinationConfigBuilder::default()
+            .last_dsts_srv(
+                LastDestinationListServiceBuilder::default()
                     .path(random_tmp_path())
                     .build()
                     .unwrap(),
@@ -1293,7 +1293,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        sync.last_conf.save_last_dsts(&dsts).unwrap();
+        sync.last_dsts_srv.save_last_dsts(&dsts).unwrap();
         sync.sync_back(&[] as &[&str; 0]).unwrap();
 
         compare_same_dirs(sync.src, dst_dir);
@@ -1315,7 +1315,7 @@ mod tests {
             .take(1)
             .collect_vec();
 
-        sync.last_conf.save_last_dsts(&dsts).unwrap();
+        sync.last_dsts_srv.save_last_dsts(&dsts).unwrap();
         sync.sync_back(&target_dsts).unwrap();
 
         dsts.iter()
@@ -1491,7 +1491,7 @@ mod clean_tests {
 
     use super::*;
 
-    use crate::config::LastDestinationConfigBuilder;
+    use crate::service::LastDestinationListServiceBuilder;
     use fake::{faker::lorem::zh_cn::Words, Fake};
     use once_cell::sync::Lazy;
     use pretty_assertions::assert_eq;
@@ -1508,8 +1508,8 @@ mod clean_tests {
             .non_interactive(true)
             .src(src)
             .dst(dst)
-            .last_conf(
-                LastDestinationConfigBuilder::default()
+            .last_dsts_srv(
+                LastDestinationListServiceBuilder::default()
                     .path(dir.join("last_dsts"))
                     .build()
                     .unwrap(),
@@ -1531,8 +1531,8 @@ mod clean_tests {
             .non_interactive(true)
             .src(src)
             .dst(dst)
-            .last_conf(
-                LastDestinationConfigBuilder::default()
+            .last_dsts_srv(
+                LastDestinationListServiceBuilder::default()
                     .path(dir.join("last_dsts"))
                     .build()
                     .unwrap(),
@@ -1775,7 +1775,7 @@ mod clean_tests {
             .map(|p| tmp_dotroot.dst.join(p))
             .sorted()
             .collect_vec();
-        let new_last_dsts = tmp_dotroot.last_conf.load_last_dsts().unwrap();
+        let new_last_dsts = tmp_dotroot.last_dsts_srv.load_last_dsts().unwrap();
 
         assert_eq!(
             new_last_dsts.into_iter().sorted().collect_vec(),
@@ -1818,7 +1818,7 @@ mod clean_tests {
 
         // pre setup last_dsts to load
         tmp_dotroot
-            .last_conf
+            .last_dsts_srv
             .save_last_dsts(&last_dst_paths)
             .unwrap();
         tmp_dotroot.clean_src(&target_src_paths).unwrap();
@@ -1869,7 +1869,7 @@ mod clean_tests {
             );
         }
 
-        let new_last_dsts = tmp_dotroot.last_conf.load_last_dsts().unwrap();
+        let new_last_dsts = tmp_dotroot.last_dsts_srv.load_last_dsts().unwrap();
         assert_eq!(
             new_last_dsts.iter().sorted().collect_vec(),
             expect_last_dsts

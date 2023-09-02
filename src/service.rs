@@ -9,18 +9,20 @@ use anyhow::Result;
 use derive_builder::Builder;
 use log::{debug, info, trace, warn};
 
+/// last dsts持久化服务
 #[derive(Debug, Clone, Builder)]
-pub struct LastDestinationConfig {
+pub struct LastDestinationListService {
     path: PathBuf,
-    // strict: bool,
 }
 
-impl LastDestinationConfig {
+impl LastDestinationListService {
+    /// 加载last dsts路径。如果不存在则返回空list
     pub fn load_last_dsts(&self) -> Result<Vec<PathBuf>> {
         self.load_last_dsts_iter()
             .and_then(|it| it.collect::<Result<Vec<_>>>())
     }
 
+    /// 保存所有dsts
     pub fn save_last_dsts<'a, T, P>(&self, dsts: T) -> Result<()>
     where
         T: IntoIterator<Item = &'a P>,
@@ -99,7 +101,7 @@ mod tests {
     #[case::ignore_relative_paths(&["/a/b/c/1.txt", "a/b", "/c"], &["/a/b/c/1.txt", "/c"])]
     fn test_load_last_dsts(#[case] paths: &[&str], #[case] expects: &[&str]) -> Result<()> {
         let tmpdir = tempdir()?;
-        let conf = LastDestinationConfig {
+        let conf = LastDestinationListService {
             path: tmpdir.path().join("last-dsts"),
         };
         conf.save_last_dsts(paths)?;
@@ -113,7 +115,7 @@ mod tests {
     #[test]
     fn test_load_last_dsts_empty_when_non_exists_file() -> Result<()> {
         let tmpdir = tempdir()?;
-        let conf = LastDestinationConfig {
+        let conf = LastDestinationListService {
             path: tmpdir.path().join("last-dsts"),
         };
         let dsts = conf.load_last_dsts()?;
