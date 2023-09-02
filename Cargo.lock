@@ -249,31 +249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotroot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ctor",
- "derive_builder",
- "dialoguer",
- "env_logger",
- "fake",
- "filetime",
- "globset",
- "itertools",
- "log",
- "nix",
- "once_cell",
- "pretty_assertions",
- "rayon",
- "rstest",
- "sha2",
- "tempfile",
- "uuid",
- "walkdir",
-]
-
-[[package]]
 name = "either"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -864,6 +839,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "syncdir"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ctor",
+ "derive_builder",
+ "dialoguer",
+ "env_logger",
+ "fake",
+ "filetime",
+ "globset",
+ "itertools",
+ "log",
+ "nix",
+ "once_cell",
+ "pretty_assertions",
+ "rayon",
+ "rstest",
+ "sha2",
+ "tempfile",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]
