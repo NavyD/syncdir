@@ -67,9 +67,25 @@ impl Syncer {
         }
 
         let last_dsts = self.last_dsts_srv.load_last_dsts()?;
+        debug!(
+            "Filtering {} last dsts by {} target dsts: {}",
+            last_dsts.len(),
+            target_dsts.len(),
+            target_dsts.iter().map(|p| p.as_ref().display()).join(",")
+        );
+        let last_dsts = last_dsts
+            .into_iter()
+            .filter(|d| target_dsts.iter().any(|t| d.starts_with(t)))
+            .collect_vec();
+        info!(
+            "Found {} last dsts in {} target dsts",
+            last_dsts.len(),
+            target_dsts.len(),
+        );
         if last_dsts.is_empty() {
             return self.sync_back_with_src(&target_dsts);
         }
+
         if !self.src.exists() || self.confirm_rm(&self.src)? {
             if target_dsts.is_empty() {
                 self.copier.copy(&self.dst, &self.src)?;
@@ -1333,6 +1349,24 @@ mod tests {
             .for_each(|(src, dst)| compare_same_dirs(src, dst));
     }
 
+    #[test]
+    fn test_sync_back_when_last_conf_not_in_targets() {
+        let sync = syncer();
+        let dst_dir = build_tree(&sync.dst).unwrap();
+        let dsts = WalkDir::new(dst_dir)
+            .min_depth(1)
+            .into_iter()
+            .map(|e| e.map(|p| p.into_path()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let target_dsts = ["a"].map(|s| dst_dir.join(s));
+        target_dsts.iter().for_each(|p| assert!(!p.exists()));
+
+        sync.last_dsts_srv.save_last_dsts(&dsts).unwrap();
+        sync.sync_back(&target_dsts).unwrap();
+
+        assert!(!sync.src.exists());
+    }
     #[test]
     fn test_apply_to_dst_when_empty_dst() {
         let sync = syncer();
