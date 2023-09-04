@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use derive_builder::Builder;
+use itertools::Itertools;
 use log::{debug, info, trace, warn};
 
 /// last dsts持久化服务
@@ -17,9 +18,40 @@ pub struct LastDestinationListService {
 
 impl LastDestinationListService {
     /// 加载last dsts路径。如果不存在则返回空list
+    #[deprecated]
     pub fn load_last_dsts(&self) -> Result<Vec<PathBuf>> {
-        self.load_last_dsts_iter()
-            .and_then(|it| it.collect::<Result<Vec<_>>>())
+        self.load_last_dsts_iter().and_then(|it| {
+            it.map(|i| i.collect::<Result<Vec<_>>>())
+                .unwrap_or_else(|| Ok(vec![]))
+        })
+    }
+
+    /// 加载指定范围内的last dsts路径。如果不存在则返回None
+    /// 如果target_dsts为空则返回所有dsts路径
+    pub fn load_last_dsts_in_targets<T, P>(&self, target_dsts: T) -> Result<Option<Vec<PathBuf>>>
+    where
+        T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let target_dsts = target_dsts.into_iter().collect_vec();
+        self.load_last_dsts_iter().and_then(|opt| {
+            if let Some(res) = opt.map(|it| {
+                if target_dsts.is_empty() {
+                    it.collect::<Result<Vec<_>>>()
+                } else {
+                    it.filter(|res| {
+                        res.as_ref()
+                            .map(|p| target_dsts.iter().any(|t| p.starts_with(t)))
+                            .unwrap_or(true)
+                    })
+                    .collect::<Result<Vec<_>>>()
+                }
+            }) {
+                Ok(Some(res?))
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     /// 保存所有dsts
@@ -51,39 +83,33 @@ impl LastDestinationListService {
         Ok(())
     }
 
-    /// 解析指定文件内容 path 作为last_dsts返回
-    ///
-    /// 如果文件不存在会创建空文件则返回空的iter
-    fn load_last_dsts_iter(&self) -> Result<impl Iterator<Item = Result<PathBuf>>> {
+    /// 解析指定文件内容 path 作为last_dsts返回，如果文件不存在返回None
+    fn load_last_dsts_iter(&self) -> Result<Option<impl Iterator<Item = Result<PathBuf>>>> {
         let p = &self.path;
         info!("Loading last dsts from {}", p.display());
 
-        if !p.exists() {
-            info!("Creating new empty file {} for last_dsts", p.display());
-            if let Some(pp) = p.parent() {
-                fs::create_dir_all(pp)?
-            }
-            File::create(p)?;
-        };
-
-        let it = BufReader::new(File::open(p)?)
-            .lines()
-            .map(|res| {
-                res.map(|line| PathBuf::from(line.trim()))
-                    .map_err(Into::into)
-            })
-            .filter(|res| {
-                res.as_deref()
-                    .map(|p| {
-                        if !p.is_absolute() {
-                            warn!("Ignored non absolute path: {}", p.display());
-                            return false;
-                        }
-                        true
-                    })
-                    .unwrap_or(true)
-            });
-        Ok(it)
+        if p.exists() {
+            let it = BufReader::new(File::open(p)?)
+                .lines()
+                .map(|res| {
+                    res.map(|line| PathBuf::from(line.trim()))
+                        .map_err(Into::into)
+                })
+                .filter(|res| {
+                    res.as_deref()
+                        .map(|p| {
+                            if !p.is_absolute() {
+                                warn!("Ignored non absolute path: {}", p.display());
+                                return false;
+                            }
+                            true
+                        })
+                        .unwrap_or(true)
+                });
+            Ok(Some(it))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -112,6 +138,40 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[case::empty(&["/a/b/c/1.txt", "/a/b"], &[])]
+    #[case::general(&["/a/b/c/1.txt", "/a/b"], &["/"])]
+    #[case::ignore_relative_paths(&["/a/b/c/1.txt", "a/b", "/c"], &["/c"])]
+    fn test_load_last_dsts_in_targets(
+        #[case] paths: &[&str],
+        #[case] targets: &[&str],
+    ) -> Result<()> {
+        // let targets = targets.iter().map(|p| p.);
+        let tmpdir = tempdir()?;
+        let conf = LastDestinationListService {
+            path: tmpdir.path().join("last-dsts"),
+        };
+
+        conf.save_last_dsts(paths)?;
+        let dsts = conf.load_last_dsts_in_targets(targets)?;
+
+        let f = |p: &Path| targets.is_empty() || targets.iter().any(|t| p.starts_with(t));
+        assert!(dsts.is_some());
+        let dsts = dsts.unwrap();
+        assert!(dsts.iter().map(|p| p.as_path()).all(f));
+
+        let expect = paths
+            .iter()
+            .map(Path::new)
+            .filter(|p| f(p))
+            .sorted()
+            .collect_vec();
+        let mut dsts = dsts;
+        dsts.sort();
+        assert_eq!(dsts, expect);
+        Ok(())
+    }
+
     #[test]
     fn test_load_last_dsts_empty_when_non_exists_file() -> Result<()> {
         let tmpdir = tempdir()?;
@@ -120,6 +180,9 @@ mod tests {
         };
         let dsts = conf.load_last_dsts()?;
         assert!(dsts.is_empty());
+
+        let dsts = conf.load_last_dsts_in_targets(&[] as &[&str; 0])?;
+        assert!(dsts.is_none());
         Ok(())
     }
 }

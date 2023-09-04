@@ -36,6 +36,9 @@ pub struct Syncer {
     #[builder(default)]
     copier: Copier,
 
+    #[builder(default = "false")]
+    dry_run: bool,
+
     last_dsts_srv: LastDestinationListService,
 }
 
@@ -66,17 +69,10 @@ impl Syncer {
             );
         }
 
-        let last_dsts = self.last_dsts_srv.load_last_dsts()?;
-        debug!(
-            "Filtering {} last dsts by {} target dsts: {}",
-            last_dsts.len(),
-            target_dsts.len(),
-            target_dsts.iter().map(|p| p.as_ref().display()).join(",")
-        );
-        let last_dsts = last_dsts
-            .into_iter()
-            .filter(|d| target_dsts.iter().any(|t| d.starts_with(t)))
-            .collect_vec();
+        let last_dsts = self
+            .last_dsts_srv
+            .load_last_dsts_in_targets(&target_dsts)?
+            .unwrap_or_default();
         info!(
             "Found {} last dsts in {} target dsts",
             last_dsts.len(),
@@ -165,40 +161,48 @@ impl Syncer {
         Ok(())
     }
 
-    /// 根据[crate::config::LastDestinationConfig]的配置在指定的target srcs中清理
-    /// src目录中的文件
+    /// 根据[LastDestinationListService]的配置与curr src在指定的target dsts中清理
+    /// dst目录中的文件，返回被移除的文件
     ///
-    /// 从[crate::config::LastDestinationConfig]中加载上次的dsts并映射回last srcs与
-    /// 当前curr srcs比较找出当前被删除的src路径（不在curr srcs中但存在于last srcs）并移除
+    /// 从[LastDestinationListService]中加载上次的dsts并映射回last srcs与
+    /// 当前curr srcs比较找出当前被删除的dsts路径（不在curr srcs中但存在于last srcs）并移除
     ///
-    /// 最后更新当前curr srcs合并last srcs未删除的保存到[crate::config::LastDestinationConfig]
-    pub fn clean_src<P>(&self, target_srcs: &[P]) -> Result<()>
+    /// 最后更新last srcs未删除的保存到[LastDestinationListService]
+    pub fn clean_dst<T, P>(&self, target_dsts: T) -> Result<Vec<PathBuf>>
     where
+        T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
+        let target_dsts = target_dsts.into_iter().collect_vec();
         if log_enabled!(log::Level::Info) {
-            let mut s = target_srcs.iter().map(|p| p.as_ref().display()).join(", ");
-            if s.is_empty() {
-                s = "[]".to_string();
-            }
-            info!("Cleaning in {} targets: {}", target_srcs.len(), s);
+            info!(
+                "Cleaning dst {} in {} targets: [{}]",
+                self.dst.display(),
+                target_dsts.len(),
+                target_dsts.iter().map(|p| p.as_ref().display()).join(", ")
+            );
         }
 
-        // let mut target_srcs = target_srcs.into_iter();
-        // 0. read last dsts from file
-        let last_dsts = self.last_dsts_srv.load_last_dsts()?;
+        // 0. read last dsts
+        let last_dsts =
+            if let Some(v) = self.last_dsts_srv.load_last_dsts_in_targets(&target_dsts)? {
+                // 即使dsts为空也会执行 保存
+                v
+            } else {
+                return Ok(vec![]);
+            };
         trace!("Loaded {} last dsts: {:?}", last_dsts.len(), last_dsts);
 
         // 1. load cur srcs
         let curr_srcs = self.load_curr_srcs()?;
-        debug!("Loaded {} curr srcs: {:?}", curr_srcs.len(), curr_srcs);
+        trace!("Loaded {} curr srcs: {:?}", curr_srcs.len(), curr_srcs);
 
         // 2. find removable srcs and dsts
-        let removables = self
-            .find_removable_src_dsts_iter(&curr_srcs, &last_dsts)?
-            .filter(|(_, dst)| {
-                target_srcs.is_empty() || target_srcs.iter().any(|p| dst.starts_with(p))
-            });
+        let removables = self.find_removable_src_dsts_iter(&curr_srcs, &last_dsts)?;
+
+        if self.dry_run {
+            return Ok(removables.map(|(_, dst)| dst).collect_vec());
+        }
 
         // 3. remove dirs. if error then save lasts and reerror
         let get_new_last_dsts = |removeds: &[PathBuf]| {
@@ -221,26 +225,32 @@ impl Syncer {
             trace!("Got {} new last dsts: {:?}", dsts.len(), dsts);
             Ok::<_, Error>(dsts)
         };
-        let new_last_dsts = match self.remove_src_dsts(removables) {
-            Ok(removeds) => get_new_last_dsts(
-                &(removeds.into_iter().unzip() as (Vec<PathBuf>, Vec<PathBuf>)).1,
-            )?,
+        let rm_dsts = match self.remove_src_dsts(removables) {
+            Ok(removeds) => {
+                let (_rm_srcs, rm_dsts) = removeds.into_iter().map(|v| (v.0, v.1)).unzip()
+                    as (Vec<PathBuf>, Vec<PathBuf>);
+                rm_dsts
+            }
             Err(mut e) => {
                 let errstr = e.to_string();
-                if let Some(removed) = e.downcast_mut::<DotRootRemovedError>() {
+                if let Some(removed_err) = e.downcast_mut::<DotRootRemovedError>() {
                     warn!(
                         "Trying to save removed {} paths for remove file error: {}",
-                        removed.src_dsts.len(),
+                        removed_err.src_dsts.len(),
                         errstr
                     );
-                    let (_, dsts): (Vec<PathBuf>, Vec<PathBuf>) =
-                        removed.src_dsts.drain(..).unzip();
+                    let dsts = removed_err
+                        .src_dsts
+                        .drain(..)
+                        .map(|(_src, dst)| dst)
+                        .collect_vec();
                     let new_last_dsts = get_new_last_dsts(&dsts)?;
                     self.last_dsts_srv.save_last_dsts(&new_last_dsts)?;
                 }
                 return Err(e);
             }
         };
+        let new_last_dsts = get_new_last_dsts(&rm_dsts)?;
 
         // 4. update dirs to file
         self.last_dsts_srv.save_last_dsts(&new_last_dsts)?;
@@ -249,7 +259,8 @@ impl Syncer {
             new_last_dsts.len(),
             new_last_dsts
         );
-        Ok(())
+
+        Ok(rm_dsts)
     }
 
     /// 从src路径转换到对应的dst路径：
@@ -293,7 +304,7 @@ impl Syncer {
     /// 同步将扫描src目录，并找到对应的dst目录dsts，根据dsts中的类型修改回
     /// src中的文件内容
     ///
-    /// 这个功能可能不会工作的很好，仅[load_last_dsts()](crate::config::LastDestinationConfig)
+    /// 这个功能可能不会工作的很好，仅[load_last_dsts()](LastDestinationListService)
     /// 为空时使用，提供基本的同步
     fn sync_back_with_src<T, P>(&self, target_dsts: T) -> Result<()>
     where
@@ -388,14 +399,17 @@ impl Syncer {
     fn remove_src_dsts<T, P>(&self, src_dsts: T) -> Result<Vec<(P, P)>>
     where
         T: IntoIterator<Item = (P, P)>,
-        P: AsRef<Path> + Debug + Clone,
+        P: AsRef<Path>,
     {
         let (mut removeds, mut skippeds) = (vec![], vec![]);
         let src_dsts = src_dsts.into_iter().collect_vec();
         debug!(
-            "Trying to remove {} src dsts: {:?}",
+            "Trying to remove {} src dsts: [{:?}]",
             src_dsts.len(),
             src_dsts
+                .iter()
+                .map(|(s, d)| format!("({},{})", s.as_ref().display(), d.as_ref().display()))
+                .join(",")
         );
 
         for (src, dst) in src_dsts {
@@ -449,14 +463,21 @@ impl Syncer {
             .push((src, dst));
         }
 
-        trace!(
-            "Removed a total of {} files: {:?}. and skipped {} files: {:?}",
-            removeds.len(),
-            removeds,
-            new_skippeds.len(),
-            new_skippeds,
-        );
-
+        if log_enabled!(log::Level::Trace) {
+            trace!(
+                "Removed a total of {} files: {:?}. and skipped {} files: {:?}",
+                removeds.len(),
+                removeds
+                    .iter()
+                    .map(|(s, d)| format!("({},{})", s.as_ref().display(), d.as_ref().display()))
+                    .join(","),
+                new_skippeds.len(),
+                new_skippeds
+                    .iter()
+                    .map(|(s, d)| format!("({},{})", s.as_ref().display(), d.as_ref().display()))
+                    .join(","),
+            );
+        }
         Ok(removeds)
     }
 
@@ -1656,15 +1677,15 @@ mod clean_tests {
     fn test_remove_src_dsts_when_non_exists<P>(
         tmp_dotroot: Syncer,
         #[case] srcs: &[P],
-        #[case] expects: &[P],
+        #[case] expect: &[P],
     ) -> Result<()>
     where
         P: AsRef<Path> + Debug,
     {
         let f = |p: &P| (tmp_dotroot.src.join(p), tmp_dotroot.dst.join(p));
-        let it = srcs.iter().map(f);
-        let removeds = tmp_dotroot.remove_src_dsts(it)?;
-        assert_eq!(removeds, expects.iter().map(f).collect_vec());
+        let src_dsts = srcs.iter().map(f).collect_vec();
+        let removeds = tmp_dotroot.remove_src_dsts(src_dsts)?;
+        assert_eq!(removeds, expect.iter().map(f).collect_vec());
         Ok(())
     }
 
@@ -1673,7 +1694,7 @@ mod clean_tests {
     fn test_remove_src_dsts_when_exists<P>(
         tmp_dotroot: Syncer,
         #[case] srcs: &[P],
-        #[case] expects: &[P],
+        #[case] expect: &[P],
     ) -> Result<()>
     where
         P: AsRef<Path> + Debug,
@@ -1691,8 +1712,9 @@ mod clean_tests {
             fs::write(dst, Words(3..10).fake::<Vec<String>>().join(" "))?;
         }
 
-        let removeds = tmp_dotroot.remove_src_dsts(it)?;
-        assert_eq!(removeds, expects.iter().map(f).collect_vec());
+        let src_dsts = srcs.iter().map(f).collect_vec();
+        let removeds = tmp_dotroot.remove_src_dsts(src_dsts)?;
+        assert_eq!(removeds, expect.iter().map(f).collect_vec());
         Ok(())
     }
 
@@ -1705,8 +1727,7 @@ mod clean_tests {
         #[case] srcs: &[&str],
         #[case] expect: &[&str],
     ) -> Result<()> {
-        let mut created_srcs =
-            create_random_files(&tmp_dotroot.src.to_str().unwrap(), srcs).unwrap();
+        let mut created_srcs = create_random_files(&tmp_dotroot.src, srcs).unwrap();
         created_srcs.sort_by_cached_key(|p| -(p.ancestors().count() as isize));
 
         // 最深的dir
@@ -1732,8 +1753,7 @@ mod clean_tests {
         fs::set_permissions(no_perm_file, perm).unwrap();
 
         let src_dst_convert = |p| (tmp_dotroot.src.join(p), tmp_dotroot.dst.join(p));
-        let src_dsts = srcs.iter().map(src_dst_convert).collect_vec();
-        let res = tmp_dotroot.remove_src_dsts(src_dsts);
+        let res = tmp_dotroot.remove_src_dsts(srcs.iter().map(src_dst_convert).collect_vec());
 
         assert!(res.is_err());
         let e = res.err().unwrap();
@@ -1749,9 +1769,11 @@ mod clean_tests {
 
     /// 创建随机的内容到文件中，paths使用相对pp的路径表示，有后缀名的作为
     /// 文件处理，否则将path创建为目录
-    fn create_random_files<P>(pp: &P, paths: &[P]) -> Result<Vec<PathBuf>>
+    fn create_random_files<T, P, Q>(pp: Q, paths: T) -> Result<Vec<PathBuf>>
     where
-        P: AsRef<Path> + Debug,
+        T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
     {
         let mut res = vec![];
         for p in paths {
@@ -1784,58 +1806,42 @@ mod clean_tests {
     #[case::empty_in_targets(&[] as &[&str], &["a"])]
     #[case::file_and_dirs_in_targets(&["a/b/1.txt", "a/b", "c/2.txt"], &["a/b"])]
     #[case::only_files_in_targets(&["a/b/1.txt", "c/2.t", "3.t"], &["c"])]
-    fn test_clean_when_no_last_dsts(
+    fn test_clean_dst_when_no_last_dsts(
         tmp_dotroot: Syncer,
-        #[case] srcs: &[&str],
-        #[case] target_srcs: &[&str],
+        #[case] dsts: &[&str],
+        #[case] target_dsts: &[&str],
     ) {
         // pre setup
-        create_random_files(&tmp_dotroot.src.to_str().unwrap(), srcs).unwrap();
-        let target_src_paths = target_srcs
+        create_random_files(&tmp_dotroot.dst, dsts).unwrap();
+        let target_dsts_paths = target_dsts
             .iter()
             .map(|s| tmp_dotroot.dst.join(s))
             .collect_vec();
 
-        tmp_dotroot.clean_src(&target_src_paths).unwrap();
+        let removeds = tmp_dotroot.clean_dst(target_dsts_paths).unwrap();
 
-        let expect_last_dsts = srcs
-            .iter()
-            // 获取所有唯一的子路径
-            .flat_map(|p| Path::new(p).ancestors())
-            // 当pop到顶时 过滤空str的路径 即不保存src/dst当前路径
-            .filter(|p| !p.to_str().unwrap().is_empty())
-            .unique()
-            // 获取srcs对应的last_dsts 用于检查对应的dsts是否被移除
-            .map(|p| tmp_dotroot.dst.join(p))
-            .sorted()
-            .collect_vec();
-        let new_last_dsts = tmp_dotroot.last_dsts_srv.load_last_dsts().unwrap();
-
-        assert_eq!(
-            new_last_dsts.into_iter().sorted().collect_vec(),
-            expect_last_dsts
-        );
+        assert!(removeds.is_empty());
     }
 
     #[rstest]
+    #[case::last_dsts_not_contains_some_srcs_in_targets(&["a/b/1.t", "c", "d/2.t"], &["a/b/1.t"], &["a/b", "d"])]
+    #[case::sames_in_targets(&["a/b/1.t", "c"], &["a/b/1.t", "c"], &["a/b", "c"])]
+    #[case::empty_last_dsts_in_targets(&["a/b/1.t", "c/2.t", "d/e"], &[], &["a/b", "c"])]
+    #[case::empty_srcs_in_targets(&[] as &[&str], &["a/b/1.t", "c/2.t", "d/e"], &["a/b", "d"])]
     #[case::empty_srcs(&[] as &[&str], &["a/b/1.t", "c/2.t", "d/e"], &[])]
     #[case::empty_last_dsts(&["a/b/1.t"], &[], &[])]
     #[case::sames(&["a/b/1.t", "c"], &["a/b/1.t", "c"], &[])]
     #[case::last_dsts_not_contains_some_srcs(&["a/b/1.t", "c", "d/2.t"], &["a/b/1.t"], &[])]
     #[case::srcs_not_contains_some_last_dsts(&["a/b/1.t"], &["a/b/1.t", "c", "d/2.t"], &[])]
     #[case::srcs_not_contains_some_last_dsts_in_targets(&["a/b/1.t"], &["a/b/1.t", "c", "d/2.t"], &["a/b", "c"])]
-    #[case::last_dsts_not_contains_some_srcs_in_targets(&["a/b/1.t", "c", "d/2.t"], &["a/b/1.t"], &["a/b", "d"])]
-    #[case::sames_in_targets(&["a/b/1.t", "c"], &["a/b/1.t", "c"], &["a/b", "c"])]
-    #[case::empty_last_dsts_in_targets(&["a/b/1.t", "c/2.t", "d/e"], &[], &["a/b", "c"])]
-    #[case::empty_srcs_in_targets(&[] as &[&str], &["a/b/1.t", "c/2.t", "d/e"], &["a/b", "d"])]
-    fn test_clean_when_last_dsts(
+    fn test_clean_dst_when_last_dsts(
         tmp_dotroot: Syncer,
         #[case] srcs: &[&str],
         #[case] last_dsts: &[&str],
-        #[case] target_srcs: &[&str],
+        #[case] target_dsts: &[&str],
     ) {
-        create_random_files(&tmp_dotroot.src.to_str().unwrap(), srcs).unwrap();
-        create_random_files(&tmp_dotroot.dst.to_str().unwrap(), last_dsts).unwrap();
+        create_random_files(&tmp_dotroot.src, srcs).unwrap();
+        create_random_files(&tmp_dotroot.dst, last_dsts).unwrap();
 
         let last_dst_paths = last_dsts
             .iter()
@@ -1845,7 +1851,7 @@ mod clean_tests {
             // 绝对路径用于检查是否存在
             .map(|p| tmp_dotroot.dst.join(p))
             .collect::<HashSet<_>>();
-        let target_src_paths = target_srcs
+        let target_dst_paths = target_dsts
             .iter()
             .map(|s| tmp_dotroot.dst.join(s))
             .collect_vec();
@@ -1855,7 +1861,12 @@ mod clean_tests {
             .last_dsts_srv
             .save_last_dsts(&last_dst_paths)
             .unwrap();
-        tmp_dotroot.clean_src(&target_src_paths).unwrap();
+        let removeds = tmp_dotroot.clean_dst(target_dst_paths).unwrap();
+        removeds.iter().for_each(|p| assert!(!p.exists()));
+        last_dst_paths
+            .iter()
+            .filter(|p| !removeds.contains(p))
+            .for_each(|p| assert!(p.exists()));
 
         let src_mapped_dst_paths = srcs
             .iter()
@@ -1866,42 +1877,47 @@ mod clean_tests {
             // 获取srcs对应的last_dsts 用于检查对应的dsts是否被移除
             .map(|p| tmp_dotroot.dst.join(p))
             .collect::<HashSet<_>>();
-
-        let expect_removed = last_dst_paths
+        let expect_removeds = last_dsts
             .iter()
-            .filter(|p| !src_mapped_dst_paths.contains(*p))
-            .filter(|p| {
-                target_src_paths.is_empty() || target_src_paths.iter().any(|t| p.starts_with(t))
-            })
-            .collect::<HashSet<_>>();
-        for p in dbg!(&expect_removed) {
-            assert!(!p.exists(), "expect non exists path {}", p.display());
-        }
-
-        // new last_dsts应该是从cur srcs中添加last dsts中跳过的部分
+            .flat_map(|s| Path::new(s).ancestors())
+            // 当pop到顶时 过滤空str的路径 即不保存src/dst当前路径
+            .filter(|p| !p.to_str().unwrap().is_empty())
+            // targets 过滤
+            .filter(|p| target_dsts.is_empty() || target_dsts.iter().any(|t| p.starts_with(t)))
+            .map(|p| tmp_dotroot.dst.join(p))
+            // 过滤不在srcs中的dst 即要移除的dst
+            .filter(|p| !src_mapped_dst_paths.contains(p))
+            .sorted()
+            .collect_vec();
+        expect_removeds.iter().for_each(|p| assert!(!p.exists()));
+        assert_eq!(
+            removeds.iter().cloned().sorted().collect_vec(),
+            expect_removeds
+        );
         let expect_last_dsts = src_mapped_dst_paths
             .iter()
             .chain(
+                // new last_dsts应该是从cur srcs中添加last dsts中跳过的部分
                 last_dst_paths
                     .iter()
-                    .filter(|p| !expect_removed.contains(p)),
+                    .filter(|p| !expect_removeds.contains(p))
+                    // 过滤当前targets
+                    .filter(|p| {
+                        target_dsts.is_empty() || target_dsts.iter().any(|t| p.starts_with(t))
+                    }),
             )
             .unique()
-            // targets仅用于清理范围但应该保存dst所有路径防止下次更改targets意外删除文件
-            // .filter(|p| {
-            //     target_src_paths.is_empty() || target_src_paths.iter().any(|t| p.starts_with(t))
-            // })
             .sorted()
             .collect_vec();
-        for p in dbg!(&expect_last_dsts) {
+        expect_last_dsts.iter().for_each(|p| {
             assert!(
                 p.exists() ||
-                    // 由于cur srcs存在但last dsts不存在时会保存到 文件中，但不会在模拟的expect_last_dsts实际被创建
-                    tmp_dotroot.get_src_path(p).unwrap().exists(),
+                // 由于cur srcs存在但last dsts不存在时会保存到 文件中，但不会在模拟的expect_last_dsts实际被创建
+                tmp_dotroot.get_src_path(p).unwrap().exists(),
                 "expect exists path {}",
                 p.display()
-            );
-        }
+            )
+        });
 
         let new_last_dsts = tmp_dotroot.last_dsts_srv.load_last_dsts().unwrap();
         assert_eq!(
