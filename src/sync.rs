@@ -22,6 +22,26 @@ use walkdir::WalkDir;
 
 use crate::{service::LastDestinationListService, util};
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyncPath {
+    Removed(PathBuf),
+    Coppied(PathBuf, PathBuf),
+    Overriden(PathBuf, PathBuf),
+}
+
+macro_rules! sync_path {
+    ($src:expr) => {
+        SyncPath::Removed($src)
+    };
+    ($src:expr, $dst:expr) => {
+        if $dst.exists() || $dst.is_symlink() {
+            SyncPath::Overriden($src, $dst)
+        } else {
+            SyncPath::Coppied($src, $dst)
+        }
+    };
+}
+
 /// 将src目录内容同步到dst目录中
 #[derive(Debug, Clone, Builder)]
 #[builder(setter(into))]
@@ -43,7 +63,7 @@ pub struct Syncer {
 }
 
 impl Syncer {
-    /// 将dst中的文件同步到src中。
+    /// 将dst中的文件同步到src中。返回复制的(src,dst)列表
     ///
     /// * 如果存在last_dsts则将所有的last_dsts文件整个复制到src目录中，src目录将被清空
     /// * 如果不存在last_dsts将从当前src中加载目录映射到dst中
@@ -51,7 +71,7 @@ impl Syncer {
     ///     * 否则比较是否改变
     ///         * 如果src与dst文件不同则覆盖src文件
     ///         * 否则跳过
-    pub fn sync_back<T, P>(&self, target_dsts: T) -> Result<()>
+    pub fn sync_back<T, P>(&self, target_dsts: T) -> Result<Vec<SyncPath>>
     where
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
@@ -78,18 +98,19 @@ impl Syncer {
             last_dsts.len(),
             target_dsts.len(),
         );
-        if last_dsts.is_empty() {
-            return self.sync_back_with_src(&target_dsts);
-        }
 
-        if !self.src.exists() || self.confirm_rm(&self.src)? {
+        if last_dsts.is_empty() {
+            self.sync_back_with_src(&target_dsts)
+        } else if !self.src.exists() || self.dry_run || self.confirm_rm(&self.src)? {
             if target_dsts.is_empty() {
-                self.copier.copy(&self.dst, &self.src)?;
+                self.copier.copy(&self.dst, &self.src)
             } else {
+                let mut res = vec![];
                 for dst in target_dsts {
                     let src = self.get_src_path(&dst)?;
-                    self.copier.copy(dst, src)?;
+                    res.extend(self.copier.copy(dst, src)?);
                 }
+                Ok(res)
             }
         } else {
             warn!(
@@ -97,8 +118,8 @@ impl Syncer {
                 self.dst.display(),
                 self.src.display()
             );
+            Ok(vec![])
         }
-        Ok(())
     }
 
     /// 将src中的文件同步到指定的target_dsts中。扫描src目录，并找到对应的dst目录dsts，
@@ -276,7 +297,7 @@ impl Syncer {
 
     fn confirm_rm(&self, p: impl AsRef<Path>) -> Result<bool> {
         let p = p.as_ref();
-        if p.exists() {
+        if !p.exists() {
             Ok(true)
         } else if self.non_interactive
             || Confirm::with_theme(&ColorfulTheme::default())
@@ -294,7 +315,13 @@ impl Syncer {
             }
             Ok(true)
         } else {
-            warn!("Skipped remove {}", p.display());
+            warn!(
+                "Skipped remove {} {}",
+                p.metadata()
+                    .map(|m| format!("{:?}", m.file_type()))
+                    .unwrap_or_else(|_| "non-exists".to_string()),
+                p.display()
+            );
             Ok(false)
         }
     }
@@ -306,7 +333,7 @@ impl Syncer {
     ///
     /// 这个功能可能不会工作的很好，仅[load_last_dsts()](LastDestinationListService)
     /// 为空时使用，提供基本的同步
-    fn sync_back_with_src<T, P>(&self, target_dsts: T) -> Result<()>
+    fn sync_back_with_src<T, P>(&self, target_dsts: T) -> Result<Vec<SyncPath>>
     where
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
@@ -318,68 +345,79 @@ impl Syncer {
                 self.src.display(),
                 self.dst.display()
             );
-            return Ok(());
+            return Ok(vec![]);
         }
-        for entry in WalkDir::new(&self.src) {
-            let entry = entry?;
-            let src = entry.path();
-            let dst = self.get_dst_path(src)?;
 
-            // skip non target dsts
-            if !target_dsts.is_empty() && target_dsts.iter().all(|t| !dst.starts_with(t)) {
-                trace!(
-                    "Skipped sync dst {} not in {} target dsts",
-                    dst.display(),
-                    target_dsts.len()
-                );
-                continue;
-            }
-            // 在walkdir后不应该找不到path
-            if !src.exists() {
-                warn!(
-                    "Skipped not exists path {} after walk dir {}",
-                    src.display(),
-                    self.src.display()
-                );
-                continue;
-            }
-            // dst不存在 移除src
-            if !dst.exists() && self.confirm_rm(src)? {
-                continue;
-            }
+        WalkDir::new(&self.src)
+            .into_iter()
+            .map(|entry| {
+                let entry = entry?;
+                let src = entry.into_path();
+                let dst = self.get_dst_path(&src)?;
 
-            // dst目录时 当src是 不存在或目录则mkdir -p, 文件则移除
-            if dst.is_dir() && (!src.exists() || !src.is_file() || self.confirm_rm(src)?) {
-                if let Err(e) = fs::create_dir(src) {
-                    // ignore exists dir error: mkdir -p
-                    if !src.is_dir() {
-                        return Err(e.into());
-                    }
+                // skip non target dsts
+                if !target_dsts.is_empty() && target_dsts.iter().all(|t| !dst.starts_with(t)) {
+                    trace!(
+                        "Skipped sync dst {} not in {} target dsts",
+                        dst.display(),
+                        target_dsts.len()
+                    );
+                    return Ok::<_, Error>(None);
                 }
-                self.copier.copy_metadata(&dst, src)?;
-                continue;
-            }
 
-            // dst为文件/软链接时 移除src目录
-            if !src.is_dir() || self.confirm_rm(src)? {
-                self.copier.copy_file(&dst, src)?;
-                continue;
-            }
+                // 在walkdir后不应该找不到path
+                if !src.exists() {
+                    warn!(
+                        "Skipped not exists path {} after walk dir {}",
+                        src.display(),
+                        self.src.display()
+                    );
+                    return Ok(None);
+                }
 
-            let path_ty_str = |p: &Path| {
-                p.metadata()
-                    .map(|m| format!("{:?}", m.file_type()))
-                    .unwrap_or_else(|_| "non-exists".to_string())
-            };
-            warn!(
-                "Skipped sync {} dst {} to {} src {}",
-                path_ty_str(&dst),
-                dst.display(),
-                path_ty_str(src),
-                src.display(),
-            );
-        }
-        Ok(())
+                if self.dry_run {
+                    return Ok(Some(if !dst.exists() {
+                        SyncPath::Removed(src)
+                    } else {
+                        SyncPath::Overriden(dst, src)
+                    }));
+                }
+
+                // dst不存在 移除src
+                if !dst.exists() {
+                    return Ok(if self.confirm_rm(&src)? {
+                        Some(sync_path!(src))
+                    } else {
+                        None
+                    });
+                }
+
+                // dst目录时 当src是 不存在或目录则mkdir -p, 文件则移除
+                if dst.is_dir() {
+                    return Ok(if src.is_dir() {
+                        self.copier.copy_metadata(&dst, &src)?;
+                        Some(SyncPath::Overriden(dst, src))
+                    } else if self.confirm_rm(&src)? {
+                        fs::create_dir(&src)?;
+                        self.copier.copy_metadata(&dst, &src)?;
+                        Some(SyncPath::Overriden(dst, src))
+                    } else {
+                        None
+                    });
+                }
+
+                // dst为文件/软链接时 移除src目录
+                Ok(if self.confirm_rm(&src)? {
+                    self.copier.copy_file(&dst, &src)?;
+                    Some(SyncPath::Overriden(dst, src))
+                } else {
+                    None
+                })
+            })
+            .filter(|res| res.as_ref().map(|opt| opt.is_some()).unwrap_or(true))
+            // safety: filter some
+            .map(|res| res.map(|opt| opt.unwrap()))
+            .collect::<Result<Vec<_>>>()
     }
 
     /// 遍历src目录找到所有文件
@@ -542,11 +580,13 @@ pub struct Copier {
 
     /// 是否跟随软链接。默认为false
     follow_symlinks: bool,
+
+    dry_run: bool,
 }
 
 impl Copier {
     /// copy all recursively
-    pub fn copy<P, Q>(&self, from: P, to: Q) -> Result<()>
+    pub fn copy<P, Q>(&self, from: P, to: Q) -> Result<Vec<SyncPath>>
     where
         P: AsRef<Path>,
         Q: AsRef<Path>,
@@ -557,22 +597,24 @@ impl Copier {
         }
 
         if from.is_dir() {
-            self.copy_dir(from, to)?;
-        } else if from.is_file() {
-            if !to.exists() {
-                self.copy_file(from, to)?;
-            } else if to.is_dir() {
-                let to =
-                    to.join(from.file_name().ok_or_else(|| {
-                        anyhow!("Not found file name for path {}", from.display())
-                    })?);
-                self.copy_file(from, to)?;
-            }
+            return self.copy_dir(from, to);
         }
-        Ok(())
+        // from is file
+        let to = if to.is_dir() {
+            to.join(
+                from.file_name()
+                    .ok_or_else(|| anyhow!("Not found file name for path {}", from.display()))?,
+            )
+        } else {
+            to.to_path_buf()
+        };
+        if !self.dry_run {
+            self.copy_file(from, &to)?;
+        }
+        Ok(vec![sync_path!(from.to_path_buf(), to)])
     }
 
-    fn copy_dir<P, Q>(&self, from: P, to: Q) -> Result<()>
+    fn copy_dir<P, Q>(&self, from: P, to: Q) -> Result<Vec<SyncPath>>
     where
         P: AsRef<Path>,
         Q: AsRef<Path>,
@@ -589,30 +631,37 @@ impl Copier {
             );
         }
 
-        for entry in WalkDir::new(from) {
-            let entry = entry?;
-            let src = entry.path();
-            let dst = util::map_path(src, from, to)?;
-            trace!("Copying path {} to {}", src.display(), dst.display());
+        WalkDir::new(from)
+            .into_iter()
+            .map(|entry| {
+                let entry = entry?;
+                let src = entry.into_path();
+                let dst = util::map_path(&src, from, to)?;
 
-            if let Some(p) = dst.parent().filter(|p| !p.exists()) {
-                fs::create_dir_all(p)?;
-            }
-            if src.is_symlink() {
-                symlink(src.read_link()?, dst)?;
-            } else if src.is_dir() {
-                if dst.is_file() || dst.is_symlink() {
-                    fs::remove_file(&dst)?;
+                if self.dry_run {
+                    return Ok(sync_path!(src, dst));
                 }
-                if !dst.exists() {
-                    fs::create_dir(&dst)?;
+
+                trace!("Copying path {} to {}", src.display(), dst.display());
+                if let Some(p) = dst.parent().filter(|p| !p.exists()) {
+                    fs::create_dir_all(p)?;
                 }
-                self.copy_metadata(src, &dst)?;
-            } else if src.is_file() {
-                self.copy_file(src, dst)?;
-            }
-        }
-        Ok(())
+                if src.is_symlink() {
+                    symlink(src.read_link()?, &dst)?;
+                } else if src.is_dir() {
+                    if dst.is_file() || dst.is_symlink() {
+                        fs::remove_file(&dst)?;
+                    }
+                    if !dst.exists() {
+                        fs::create_dir(&dst)?;
+                    }
+                    self.copy_metadata(&src, &dst)?;
+                } else if src.is_file() {
+                    self.copy_file(&src, &dst)?;
+                }
+                Ok::<_, Error>(sync_path!(src, dst))
+            })
+            .collect::<Result<Vec<_>>>()
     }
 
     /// 复制文件from到文件to中
@@ -851,6 +900,7 @@ fn confirm_rm<P: AsRef<Path>>(src: P, dst: P, non_interactive: bool) -> Result<b
 #[cfg(test)]
 mod tests {
     use once_cell::sync::Lazy;
+    use pretty_assertions::assert_eq;
     use tempfile::{tempdir, TempDir};
 
     use crate::service::LastDestinationListServiceBuilder;
@@ -866,9 +916,8 @@ mod tests {
     use fake::{faker::lorem::en::Words, Fake};
     use uuid::Uuid;
 
-    static TMPDIR: Lazy<TempDir> = Lazy::new(|| tempdir().unwrap());
-
     fn random_tmp_path() -> PathBuf {
+        static TMPDIR: Lazy<TempDir> = Lazy::new(|| tempdir().unwrap());
         TMPDIR.path().join(Uuid::new_v4().to_string())
     }
 
@@ -1177,6 +1226,49 @@ mod tests {
     }
 
     #[test]
+    fn test_copy_dir_when_dry_run() {
+        let from = build_dir_tree().unwrap();
+        let to = random_tmp_path();
+        let expect_from_paths = WalkDir::new(&from)
+            .into_iter()
+            .map(|entry| {
+                entry.map_err(Into::into).and_then(|e| {
+                    let src = e.into_path();
+                    let dst = util::map_path(&src, &from, &to)?;
+                    Ok::<_, Error>(sync_path!(src, dst))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let cp = CopierBuilder::default().dry_run(true).build().unwrap();
+        let paths = cp.copy_dir(&from, &to).unwrap();
+
+        assert!(from.is_dir());
+        assert!(!to.is_dir());
+        assert!(!paths.is_empty());
+        assert_eq!(expect_from_paths, paths);
+
+        fs::create_dir_all(&to).unwrap();
+        let expect_from_paths = WalkDir::new(&from)
+            .into_iter()
+            .map(|entry| {
+                entry.map_err(Into::into).and_then(|e| {
+                    let src = e.into_path();
+                    let dst = util::map_path(&src, &from, &to)?;
+                    Ok::<_, Error>(sync_path!(src, dst))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let paths = cp.copy_dir(&from, &to).unwrap();
+        assert!(to.is_dir());
+        assert!(to.read_dir().unwrap().next().is_none());
+        assert!(!paths.is_empty());
+        assert_eq!(expect_from_paths, paths);
+    }
+
+    #[test]
     fn test_copier_has_changed_on_symlink() {
         // setup
         let src = random_tmp_path();
@@ -1221,13 +1313,16 @@ mod tests {
         assert!(dst_dir.is_dir());
 
         assert!(!sync.src.exists());
-        sync.sync_back_with_src([] as [&str; 0]).unwrap();
+        let paths = sync.sync_back_with_src([] as [&str; 0]).unwrap();
         assert!(!sync.src.exists());
+        assert!(paths.is_empty());
 
         fs::create_dir_all(&sync.src).unwrap();
-        sync.sync_back_with_src([] as [&str; 0]).unwrap();
+        let paths = sync.sync_back_with_src([] as [&str; 0]).unwrap();
         assert!(sync.src.is_dir());
         assert!(sync.src.read_dir().unwrap().next().is_none());
+        assert_eq!(paths.len(), 1);
+        assert_eq!(&paths[0], &SyncPath::Overriden(sync.dst, sync.src))
     }
 
     #[test]
@@ -1239,9 +1334,46 @@ mod tests {
         let src_dir = build_tree(&sync.src).unwrap();
         assert!(src_dir.is_dir());
 
-        sync.sync_back_with_src([] as [&str; 0]).unwrap();
-
+        let paths = sync.sync_back_with_src([] as [&str; 0]).unwrap();
+        assert!(!paths.is_empty());
+        paths.iter().for_each(|sp| match sp {
+            SyncPath::Overriden(_, _) => {}
+            _ => panic!("non overriden sync path: {:?}", sp),
+        });
         compare_same_dirs(src_dir, dst_dir);
+    }
+
+    #[test]
+    fn test_sync_back_with_src_when_dry_run() {
+        let mut sync = syncer();
+        sync.dry_run = true;
+        let src_dir = build_tree(&sync.src).unwrap();
+        let src_meta = fs::metadata(src_dir).unwrap();
+        let mut perm = src_meta.permissions();
+        perm.set_readonly(true);
+        fs::set_permissions(src_dir, perm).unwrap();
+        // test perms
+        let e = fs::create_dir_all(src_dir.join(Uuid::new_v4().to_string()));
+        assert!(e.is_err());
+        assert_eq!(e.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        let expect_paths = WalkDir::new(src_dir)
+            .into_iter()
+            .map(|entry| {
+                entry.map_err(Into::into).and_then(|e| {
+                    let src = e.into_path();
+                    let dst = util::map_path(&src, src_dir, &sync.dst)?;
+                    Ok::<_, Error>(if dst.exists() {
+                        sync_path!(dst, src)
+                    } else {
+                        sync_path!(src)
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let paths = sync.sync_back_with_src([] as [&str; 0]).unwrap();
+        assert_eq!(paths, expect_paths);
     }
 
     #[test]
@@ -1300,7 +1432,20 @@ mod tests {
             })
             .collect_vec();
 
-        sync.sync_back_with_src([] as [&str; 0]).unwrap();
+        let expect_paths = WalkDir::new(src_dir)
+            .into_iter()
+            .map(|entry| {
+                entry.map_err(Into::into).and_then(|e| {
+                    let src = e.into_path();
+                    let dst = util::map_path(&src, src_dir, dst_dir)?;
+                    Ok::<_, Error>(sync_path!(dst, src))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let paths = sync.sync_back_with_src([] as [&str; 0]).unwrap();
+        assert_eq!(expect_paths, paths);
 
         // 修改的src文件 内容同步dst
         for src in mod_src_files {
