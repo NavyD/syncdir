@@ -218,13 +218,11 @@ impl Syncer {
         }
 
         // 0. read last dsts
-        let last_dsts =
-            if let Some(v) = self.last_dsts_srv.load_last_dsts_in_targets(&target_dsts)? {
-                // 即使dsts为空也会执行 保存
-                v
-            } else {
-                return Ok(vec![]);
-            };
+        let last_dsts = self
+            .last_dsts_srv
+            .load_last_dsts_in_targets(&target_dsts)?
+            // 即使dsts为空也会执行 保存
+            .unwrap_or_default();
         trace!("Loaded {} last dsts: {:?}", last_dsts.len(), last_dsts);
 
         // 1. load cur srcs
