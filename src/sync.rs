@@ -126,60 +126,73 @@ impl Syncer {
     /// 将src存在的文件复制到dsts中
     ///
     /// 类似[Self::sync_back_with_src()]
-    pub fn apply_to_dst<T, P>(&self, target_dsts: T) -> Result<()>
+    ///
+    /// ## Errors
+    ///
+    /// 在应用过程中由于权限metadata等问题不会创建dst目录
+    /// 如果dst目录不存在时
+    pub fn apply_to_dst<T, P>(&self, target_dsts: T) -> Result<Vec<SyncPath>>
     where
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
         let target_dsts = target_dsts.into_iter().collect_vec();
-        WalkDir::new(&self.src).into_iter().try_for_each(|entry| {
-            let entry = entry?;
-            let src = entry.path();
-            let dst = self.get_dst_path(src)?;
+        WalkDir::new(&self.src)
+            .into_iter()
+            .map(|entry| {
+                let entry = entry?;
+                let src = entry.into_path();
+                let dst = self.get_dst_path(&src)?;
+                // println!("src {}, dst {}", src.display(), dst.display());
 
-            // skip non target dsts
-            if !target_dsts.is_empty() && target_dsts.iter().all(|t| !dst.starts_with(t)) {
-                trace!(
-                    "Skipped sync dst {} not in {} target dsts",
-                    dst.display(),
-                    target_dsts.len()
-                );
-                return Ok(());
-            }
-            if !dst.exists() {
-                self.copier.copy(src, dst)?;
-                return Ok(());
-            }
-            if dst.is_dir() && (!src.is_file() || self.confirm_rm(&dst)?) {
-                if let Err(e) = fs::create_dir(src) {
-                    // ignore exists dir error: mkdir -p
-                    if !src.is_dir() {
-                        return Err(e.into());
-                    }
+                // skip non target dsts
+                if !target_dsts.is_empty() && target_dsts.iter().all(|t| !dst.starts_with(t)) {
+                    trace!(
+                        "Skipped sync dst {} not in {} target dsts",
+                        dst.display(),
+                        target_dsts.len()
+                    );
+                    return Ok(None);
                 }
-                self.copier.copy_metadata(src, dst)?;
-                return Ok(());
-            }
-            if !src.is_dir() || self.confirm_rm(&dst)? {
-                self.copier.copy_file(src, dst)?;
-                return Ok(());
-            }
 
-            let path_ty_str = |p: &Path| {
-                p.metadata()
-                    .map(|m| format!("{:?}", m.file_type()))
-                    .unwrap_or_else(|_| "non-exists".to_string())
-            };
-            warn!(
-                "Skipped apply {} src {} to {} dst {}",
-                path_ty_str(src),
-                src.display(),
-                path_ty_str(&dst),
-                dst.display(),
-            );
-            Ok::<_, Error>(())
-        })?;
-        Ok(())
+                if self.dry_run {
+                    return Ok(Some(sync_path!(src, dst)));
+                }
+
+                if !dst.exists() {
+                    if src.is_dir() {
+                        fs::create_dir_all(&dst)?;
+                        self.copier.copy_metadata(&src, &dst)?;
+                    } else {
+                        self.copier.copy_file(&src, &dst)?;
+                    }
+                    return Ok(Some(SyncPath::Coppied(src, dst)));
+                }
+
+                if dst.is_dir() {
+                    return Ok(if src.is_dir() {
+                        self.copier.copy_metadata(&src, &dst)?;
+                        Some(SyncPath::Overriden(src, dst))
+                    } else if self.confirm_rm(&dst)? {
+                        fs::create_dir(&dst)?;
+                        self.copier.copy_metadata(&src, &dst)?;
+                        Some(SyncPath::Overriden(src, dst))
+                    } else {
+                        None
+                    });
+                }
+
+                Ok::<_, Error>(if self.confirm_rm(&dst)? {
+                    self.copier.copy_file(&src, &dst)?;
+                    Some(SyncPath::Overriden(src, dst))
+                } else {
+                    None
+                })
+            })
+            .filter(|res| res.as_ref().map(|opt| opt.is_some()).unwrap_or(true))
+            // safety: filter some
+            .map(|res| res.map(|opt| opt.unwrap()))
+            .collect::<Result<Vec<_>>>()
     }
 
     /// 根据[LastDestinationListService]的配置与curr src在指定的target dsts中清理
