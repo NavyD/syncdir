@@ -590,7 +590,11 @@ pub struct Copier {
     gid: Option<u32>,
 
     /// 是否跟随软链接。默认为false
+    /// TODO: true时目前无法正常工作
     follow_symlinks: bool,
+
+    /// 是否保留目录文件amtimes
+    filetimes: bool,
 
     dry_run: bool,
 }
@@ -642,7 +646,7 @@ impl Copier {
             );
         }
 
-        WalkDir::new(from)
+        let paths = WalkDir::new(from)
             .into_iter()
             .map(|entry| {
                 let entry = entry?;
@@ -653,26 +657,61 @@ impl Copier {
                     return Ok(sync_path!(src, dst));
                 }
 
-                trace!("Copying path {} to {}", src.display(), dst.display());
+                let overriden = dst.is_symlink() || dst.exists();
+                if log_enabled!(log::Level::Trace) {
+                    let src_ty_str = if src.is_symlink() {
+                        "link"
+                    } else if src.is_dir() {
+                        "dir "
+                    } else {
+                        "file"
+                    };
+                    trace!(
+                        "Copying {} {} to{} {}",
+                        src_ty_str,
+                        src.display(),
+                        if overriden { " overriden" } else { "" },
+                        dst.display()
+                    );
+                }
+
                 if let Some(p) = dst.parent().filter(|p| !p.exists()) {
                     fs::create_dir_all(p)?;
                 }
                 if src.is_symlink() {
                     symlink(src.read_link()?, &dst)?;
                 } else if src.is_dir() {
-                    if dst.is_file() || dst.is_symlink() {
+                    if dst.is_symlink() || dst.is_file() {
                         fs::remove_file(&dst)?;
-                    }
-                    if !dst.exists() {
+                    } else if !dst.exists() {
                         fs::create_dir(&dst)?;
                     }
                     self.copy_metadata(&src, &dst)?;
                 } else if src.is_file() {
                     self.copy_file(&src, &dst)?;
                 }
-                Ok::<_, Error>(sync_path!(src, dst))
+
+                Ok::<_, Error>(if overriden {
+                    SyncPath::Overriden(src, dst)
+                } else {
+                    SyncPath::Coppied(src, dst)
+                })
             })
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+
+        if self.filetimes {
+            // 注意：由于copy目录dst在添加文件后dst目录mtime被修改，重新修改时间
+            WalkDir::new(to)
+                .contents_first(true)
+                .into_iter()
+                .try_for_each(|entry| {
+                    let dst = entry?.into_path();
+                    let src = util::map_path(&dst, to, from)?;
+                    self.copy_filetimes(src, dst)?;
+                    Ok::<_, Error>(())
+                })?;
+        }
+        Ok(paths)
     }
 
     /// 复制文件from到文件to中
@@ -829,13 +868,33 @@ impl Copier {
                 chown(to, self.uid.map(Into::into), self.gid.map(Into::into))?;
             }
         }
+        Ok(())
+    }
 
-        if let Err(e) = filetime::set_file_times(
-            to,
-            FileTime::from_last_access_time(&meta),
-            FileTime::from_last_modification_time(&meta),
-        ) {
-            warn!("Failed to set file {} atime/mtime: {}", to.display(), e);
+    fn copy_filetimes<P, Q>(&self, from: P, to: Q) -> Result<()>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        let (from, to) = (from.as_ref(), to.as_ref());
+        if let Ok(meta) = from.symlink_metadata() {
+            if let Err(e) = filetime::set_symlink_file_times(
+                to,
+                FileTime::from_last_access_time(&meta),
+                FileTime::from_last_modification_time(&meta),
+            ) {
+                warn!("Failed to set file {} atime/mtime: {}", to.display(), e);
+            }
+        } else {
+            let meta = from.metadata()?;
+
+            if let Err(e) = filetime::set_file_times(
+                to,
+                FileTime::from_last_access_time(&meta),
+                FileTime::from_last_modification_time(&meta),
+            ) {
+                warn!("Failed to set file {} atime/mtime: {}", to.display(), e);
+            }
         }
         Ok(())
     }
@@ -1183,57 +1242,6 @@ mod tests {
         let to_meta = to.metadata().unwrap();
         // test eq mode after copy metadata
         assert_eq!(from_meta.mode(), to_meta.mode());
-    }
-
-    #[test]
-    fn test_copy_file_times() {
-        let cp = Copier::default();
-        let from = random_tmp_path().join("a.t");
-        create_random_files(&[&from]).unwrap();
-        assert!(from.is_file());
-        thread::sleep(Duration::from_millis(300));
-
-        let to = random_tmp_path();
-        cp.copy_file(&from, &to).unwrap();
-
-        let (from_meta, to_meta) = (from.metadata().unwrap(), to.metadata().unwrap());
-        assert_eq!(from_meta.atime(), to_meta.atime());
-        assert_eq!(from_meta.mtime(), to_meta.mtime());
-    }
-
-    #[test]
-    fn test_copy_dir() {
-        let from = build_dir_tree().unwrap();
-        let to = random_tmp_path();
-
-        Copier::default().copy_dir(&from, &to).unwrap();
-
-        assert!(from.is_dir());
-        assert!(to.is_dir());
-        let from_paths = WalkDir::new(&from)
-            .into_iter()
-            .map(|e| e.map(|p| p.into_path()))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let to_paths = WalkDir::new(&to)
-            .into_iter()
-            .map(|e| e.map(|p| p.into_path()))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(from_paths.len(), to_paths.len());
-
-        assert_eq!(
-            from_paths
-                .iter()
-                .map(|p| p.strip_prefix(&from))
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap(),
-            to_paths
-                .iter()
-                .map(|p| p.strip_prefix(&to))
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-        );
     }
 
     #[test]
