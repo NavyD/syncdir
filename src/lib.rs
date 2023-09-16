@@ -1,6 +1,7 @@
 pub mod service;
 pub mod util;
 pub mod sync;
+pub mod cli;
 
 #[cfg(test)]
 mod tests {
