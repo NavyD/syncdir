@@ -1,114 +1,294 @@
-use std::{fs, os::unix, path::Path};
+use std::{
+    fs, io,
+    os::unix,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{bail, Result};
-use tempfile::TempDir;
+use filetime::FileTime;
+use itertools::Itertools;
+use pretty_assertions::assert_eq;
+use syncdir::{
+    service::{LastDestinationListService, LastDestinationListServiceBuilder},
+    sync::{Copier, CopierBuilder},
+};
+use tempfile::{NamedTempFile, TempDir};
 use walkdir::WalkDir;
 
+pub struct TmpTree {
+    root: TempDir,
+    /// 创建的目录树不包含symlinks
+    dir: PathBuf,
+    /// 链接到目录树的symlinks 目录
+    sym_dir: PathBuf,
+    /// 不可用的symlinks 目录
+    bad_sym_dir: Option<PathBuf>,
+}
+
 pub struct TestEnv {
-    /// Temporary working directory.
-    temp_dir: TempDir,
+    last_dsts_holder: Option<(NamedTempFile, LastDestinationListService)>,
+
+    dst: Option<TmpTree>,
+    src: TmpTree,
+    copier: Copier,
 }
 
 impl TestEnv {
-    pub fn new<T, P>(paths: T) -> Self
+    pub fn new<T, P>(rel_srcs: T) -> Self
     where
         P: AsRef<Path>,
         T: IntoIterator<Item = P>,
     {
-        let temp_dir = create_tree(paths, false).expect("create dir tree");
-        Self { temp_dir }
+        Self {
+            src: create_tree(rel_srcs, false).expect("create dir tree"),
+            last_dsts_holder: None,
+            dst: None,
+            copier: CopierBuilder::default().build().unwrap(),
+        }
+    }
+
+    /// 将修改rel_mod_srcs中对应的src路径文件的内容等
+    pub fn with_mod_srcs<F>(self, mod_fn: F) -> Self
+    where
+        F: Fn(&Path) -> Result<()>,
+    {
+        WalkDir::new(self.src.root.path())
+            .into_iter()
+            .try_for_each(|entry| mod_fn(&entry?.into_path()))
+            .unwrap();
+        self
+    }
+
+    pub fn with_dsts<T, P>(mut self, rel_dsts: T) -> Self
+    where
+        P: AsRef<Path>,
+        T: IntoIterator<Item = P>,
+    {
+        let dst = create_tree(rel_dsts, self.src.bad_sym_dir.is_some()).unwrap();
+        self.dst = Some(dst);
+        self
+    }
+
+    /// 使用cp用于比较src与被复制后的dst目录内容，
+    /// 如果未指定则会使用默认的cp
+    pub fn with_copier(mut self, copier: Copier) -> Self {
+        self.copier = copier;
+        self
+    }
+
+    pub fn with_last_dsts<T, P>(mut self, rel_last_dsts: T) -> Self
+    where
+        P: AsRef<Path>,
+        T: IntoIterator<Item = P>,
+    {
+        let tmp_last_dst = tempfile::Builder::new()
+            .prefix("syncdir-last-dsts")
+            .tempfile()
+            .unwrap();
+        let last_dsts_srv = LastDestinationListServiceBuilder::default()
+            .path(tmp_last_dst.path().to_path_buf())
+            .build()
+            .unwrap();
+
+        let paths = rel_last_dsts
+            .into_iter()
+            .flat_map(|p| {
+                let mut v = vec![self.src.dir.join(p.as_ref()), self.src.sym_dir.join(&p)];
+                if let Some(bad_sym_dir) = &self.src.bad_sym_dir {
+                    v.push(bad_sym_dir.join(p))
+                }
+                v.into_iter()
+            })
+            .collect_vec();
+
+        last_dsts_srv.save_last_dsts(&paths).unwrap();
+        self.last_dsts_holder = Some((tmp_last_dst, last_dsts_srv));
+        self
     }
 
     pub fn root(&self) -> &Path {
-        self.temp_dir.path()
+        self.src.root.path()
     }
-}
 
-pub fn assert_same_path<P, Q>(src: P, dst: Q)
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-{
-    let (src, dst) = (src.as_ref(), dst.as_ref());
-    if src.is_symlink() {
-        assert!(dst.is_symlink());
-        let read_link_end = |p: &Path| {
-            let mut p = p.to_path_buf();
-            while p.is_symlink() {
-                p = p.read_link().unwrap();
+    pub fn dst_root(&self) -> &Path {
+        self.dst.as_ref().unwrap().root.path()
+    }
+
+    pub fn copier(&self) -> &Copier {
+        &self.copier
+    }
+
+    pub fn last_dsts_srv(&self) -> Option<&LastDestinationListService> {
+        self.last_dsts_holder.as_ref().map(|v| &v.1)
+    }
+
+    pub fn assert_synced<T, P>(&self, rel_target_dsts: T)
+    where
+        P: AsRef<Path>,
+        T: IntoIterator<Item = P>,
+    {
+        let (src, dst) = (self.src.root.path(), self.dst.as_ref().unwrap().root.path());
+        let rel_target_dsts = rel_target_dsts.into_iter().collect_vec();
+        if rel_target_dsts.is_empty() {
+            self.assert_same_dir(src, dst);
+        } else {
+            for relp in rel_target_dsts {
+                let (src, dst) = (src.join(&relp), dst.join(&relp));
+                self.assert_same_dir(src, dst);
             }
-            p
-        };
-        assert_eq!(read_link_end(src), read_link_end(dst));
-    } else {
-        assert!(!dst.is_symlink());
-        assert!(src.exists());
-        assert!(dst.exists());
-        let (src_meta, dst_meta) = (src.metadata().unwrap(), dst.metadata().unwrap());
-        assert_eq!(src_meta.file_type(), dst_meta.file_type());
-        assert_eq!(src_meta.len(), dst_meta.len());
-        if src_meta.is_file() {
-            assert_eq!(fs::read(src).unwrap(), fs::read(dst).unwrap());
+        }
+    }
+
+    pub fn assert_same_dir<P, Q>(&self, src: P, dst: Q)
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        let (src, dst) = (src.as_ref(), dst.as_ref());
+
+        let srcs = WalkDir::new(src)
+            .into_iter()
+            .map(|e| e.map(|p| p.into_path()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let dsts = WalkDir::new(dst)
+            .into_iter()
+            .map(|e| e.map(|p| p.into_path()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        if srcs.len() != dsts.len() {
+            return;
+        }
+
+        assert_eq!(
+            srcs.iter().filter(|p| p.is_symlink()).count(),
+            dsts.iter().filter(|p| p.is_symlink()).count()
+        );
+        assert_eq!(
+            srcs.iter().filter(|p| p.is_dir()).count(),
+            dsts.iter().filter(|p| p.is_dir()).count()
+        );
+        assert_eq!(
+            srcs.iter().filter(|p| p.is_file()).count(),
+            dsts.iter().filter(|p| p.is_file()).count()
+        );
+
+        let rel_srcs = srcs
+            .iter()
+            .map(|p| p.strip_prefix(src))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let rel_dsts = dsts
+            .iter()
+            .map(|p| p.strip_prefix(dst))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rel_srcs, rel_dsts);
+
+        for i in 0..srcs.len() {
+            assert_eq!(
+                srcs[i].strip_prefix(src).unwrap(),
+                dsts[i].strip_prefix(dst).unwrap()
+            );
+            self.assert_same_path(&srcs[i], &dsts[i]);
+        }
+    }
+
+    pub fn assert_same_path<P, Q>(&self, src: P, dst: Q)
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        let (src, dst) = (src.as_ref(), dst.as_ref());
+
+        if src.is_symlink() {
+            assert!(dst.is_symlink());
+            self.assert_filetimes(src, dst);
+            let read_link_end = |p: &Path| {
+                let mut p = p.to_path_buf();
+                while p.is_symlink() {
+                    p = p.read_link().unwrap();
+                }
+                p
+            };
+            assert_eq!(
+                read_link_end(src),
+                read_link_end(dst),
+                "read symlink src={}, dst={}",
+                src.display(),
+                dst.display()
+            );
+        } else {
+            assert!(!dst.is_symlink());
+            assert!(src.exists());
+            assert!(dst.exists());
+            self.assert_filetimes(src, dst);
+            let (src_meta, dst_meta) = (src.metadata().unwrap(), dst.metadata().unwrap());
+            assert_eq!(src_meta.file_type(), dst_meta.file_type());
+            assert_eq!(src_meta.len(), dst_meta.len());
+            if src_meta.is_file() {
+                assert_eq!(fs::read(src).unwrap(), fs::read(dst).unwrap());
+            }
+        }
+
+        // assert perms
+        let (src_meta, dst_meta) = (metadata(src).unwrap(), metadata(dst).unwrap());
+        if let Some(mode) = self.copier.mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let mut src_perm = src_meta.permissions();
+            src_perm.set_mode(mode);
+            assert_eq!(src_perm, dst_meta.permissions())
+        } else {
+            // 默认复制权限
+            assert_eq!(src_meta.permissions(), dst_meta.permissions());
+        }
+    }
+
+    /// WARN: 应该在读取文件前调用否则会更新last_accessed time导致测试失败
+    fn assert_filetimes<P, Q>(&self, src: P, dst: Q)
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        if self.copier.filetimes() {
+            let (src, dst) = (src.as_ref(), dst.as_ref());
+
+            let get_am_times = |p: &Path| {
+                let meta = metadata(p).unwrap();
+                (
+                    Into::<FileTime>::into(meta.accessed().unwrap()),
+                    Into::<FileTime>::into(meta.modified().unwrap()),
+                )
+            };
+            let (src_atime, src_mtime) = get_am_times(src);
+            let (dst_atime, dst_mtime) = get_am_times(dst);
+            // 注意：由于copy会访问src文件导致src atime被修改，而目录dst在添加文件后mtime被修改
+            assert_eq!(
+                dst_mtime,
+                src_mtime,
+                "mtime for src={},dst={}",
+                src.display(),
+                dst.display()
+            );
+            // WARN: 由于assert会访问目录导致access时间被更新，使用误差时间
+            let diff = src_atime.nanoseconds() as i128 - dst_atime.nanoseconds() as i128;
+            let limit = Duration::from_millis(100);
+            let r = limit.as_nanos() as i128;
+            assert!(
+                (-r..=r).contains(&diff),
+                "atime diff more than {}ms for src={}: {:?},dst={}: {:?}",
+                limit.as_millis(),
+                src.display(),
+                src_atime,
+                dst.display(),
+                dst_atime,
+            );
         }
     }
 }
 
-pub fn assert_same_dir<P, Q>(src: P, dst: Q)
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-{
-    let (src, dst) = (src.as_ref(), dst.as_ref());
-
-    let srcs = WalkDir::new(src)
-        .into_iter()
-        .map(|e| e.map(|p| p.into_path()))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let dsts = WalkDir::new(dst)
-        .into_iter()
-        .map(|e| e.map(|p| p.into_path()))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    if srcs.len() != dsts.len() {
-        return;
-    }
-
-    assert_eq!(
-        srcs.iter().filter(|p| p.is_symlink()).count(),
-        dsts.iter().filter(|p| p.is_symlink()).count()
-    );
-    assert_eq!(
-        srcs.iter().filter(|p| p.is_dir()).count(),
-        dsts.iter().filter(|p| p.is_dir()).count()
-    );
-    assert_eq!(
-        srcs.iter().filter(|p| p.is_file()).count(),
-        dsts.iter().filter(|p| p.is_file()).count()
-    );
-
-    let rel_srcs = srcs
-        .iter()
-        .map(|p| p.strip_prefix(src))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let rel_dsts = dsts
-        .iter()
-        .map(|p| p.strip_prefix(dst))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(rel_srcs, rel_dsts);
-
-    for i in 0..srcs.len() {
-        assert_eq!(
-            srcs[i].strip_prefix(src).unwrap(),
-            dsts[i].strip_prefix(dst).unwrap()
-        );
-        assert_same_path(&srcs[i], &dsts[i]);
-    }
-}
-
-fn create_tree<P, T>(rel_paths: T, bad_symlink: bool) -> Result<TempDir>
+fn create_tree<P, T>(rel_paths: T, bad_symlink: bool) -> Result<TmpTree>
 where
     T: IntoIterator<Item = P>,
     P: AsRef<Path>,
@@ -161,5 +341,23 @@ where
         }
     }
 
-    Ok(tmpdir)
+    Ok(TmpTree {
+        root: tmpdir,
+        dir,
+        sym_dir,
+        bad_sym_dir: if bad_symlink {
+            Some(bad_sym_dst_dir)
+        } else {
+            None
+        },
+    })
+}
+
+fn metadata(p: impl AsRef<Path>) -> io::Result<fs::Metadata> {
+    let p = p.as_ref();
+    if p.is_symlink() {
+        p.symlink_metadata()
+    } else {
+        p.metadata()
+    }
 }

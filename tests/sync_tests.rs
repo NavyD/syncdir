@@ -1,10 +1,10 @@
-use common::{assert_same_dir, TestEnv};
+use common::TestEnv;
 use filetime::{set_file_times, set_symlink_file_times, FileTime};
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use syncdir::{
-    sync::{CopierBuilder, SyncPath},
+    sync::{CopierBuilder, SyncPath, SyncerBuilder},
     util, CRATE_NAME,
 };
 use tempfile::TempDir;
@@ -12,22 +12,13 @@ use walkdir::WalkDir;
 
 mod common;
 
-use std::{path::Path, sync::Once};
+use std::{fs, io, path::Path, sync::Once};
 
 use log::LevelFilter;
 
-#[ctor::ctor]
-fn init() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        env_logger::builder()
-            .is_test(true)
-            .filter_level(LevelFilter::Info)
-            .filter_module(CRATE_NAME, LevelFilter::Trace)
-            .init();
-    });
-}
-
+static EMPTY: [&str; 0] = [];
+static ONLY_FILES: [&str; 2] = ["a.t", "b.t"];
+static SIMPLE: [&str; 3] = ["a/b/c/1.t", "a/b/2.t", "d/e/3.t"];
 static MOCK_PATHS: [&str; 20] = [
     "usr/local/lib/systemd/system/clash.service",
     "etc/network",
@@ -51,17 +42,36 @@ static MOCK_PATHS: [&str; 20] = [
     "etc/openresty/sites-available/p.navyd.xyz.conf",
 ];
 
-static ONLY_FILES: [&str; 2] = ["a.t", "b.t"];
-static SIMPLE: [&str; 3] = ["a/b/c/1.t", "a/b/2.t", "d/e/3.t"];
+#[ctor::ctor]
+fn init() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        env_logger::builder()
+            .is_test(true)
+            .filter_level(LevelFilter::Info)
+            .filter_module(CRATE_NAME, LevelFilter::Trace)
+            .init();
+    });
+}
+
+fn metadata(p: impl AsRef<Path>) -> io::Result<fs::Metadata> {
+    let p = p.as_ref();
+    if p.is_symlink() {
+        p.symlink_metadata()
+    } else {
+        p.metadata()
+    }
+}
 
 #[rstest]
-#[case::simple(SIMPLE)]
-#[case::only_files(ONLY_FILES)]
-#[case::mock_paths(MOCK_PATHS)]
-fn test_copy_simple<const N: usize>(#[case] paths: [&str; N]) {
+#[case::empty(&EMPTY)]
+#[case::simple(&SIMPLE)]
+#[case::only_files(&ONLY_FILES)]
+#[case::mock_paths(&MOCK_PATHS)]
+fn test_copy_simple(#[case] paths: &[&str]) {
     let te = TestEnv::new(paths);
     let src = te.root();
-    let cp = CopierBuilder::default().build().unwrap();
+    let cp = te.copier();
     let test = |dst: &Path| {
         let dst_exists = dst.exists();
         let paths = cp.copy(src, dst).unwrap();
@@ -79,7 +89,7 @@ fn test_copy_simple<const N: usize>(#[case] paths: [&str; N]) {
         } else {
             assert_eq!(coppieds, paths.iter().collect_vec());
         }
-        assert_same_dir(src, dst)
+        te.assert_same_dir(src, dst)
     };
 
     test(TempDir::new().unwrap().path());
@@ -87,11 +97,13 @@ fn test_copy_simple<const N: usize>(#[case] paths: [&str; N]) {
 }
 
 #[rstest]
-#[case::simple(SIMPLE)]
-#[case::only_files(ONLY_FILES)]
-#[case::mock_paths(MOCK_PATHS)]
-fn test_copy_file_times<const N: usize>(#[case] paths: [&str; N]) {
-    let te = TestEnv::new(paths);
+#[case::empty(&EMPTY)]
+#[case::simple(&SIMPLE)]
+#[case::only_files(&ONLY_FILES)]
+#[case::mock_paths(&MOCK_PATHS)]
+fn test_copy_file_times(#[case] paths: &[&str]) {
+    let te =
+        TestEnv::new(paths).with_copier(CopierBuilder::default().filetimes(true).build().unwrap());
     let to = TempDir::new().unwrap();
     let (src_base, dst_base) = (te.root(), to.path());
 
@@ -112,19 +124,14 @@ fn test_copy_file_times<const N: usize>(#[case] paths: [&str; N]) {
     };
 
     let get_am_times = |p: &Path| {
-        let meta = if p.is_symlink() {
-            p.symlink_metadata()
-        } else {
-            p.metadata()
-        }
-        .unwrap();
+        let meta = metadata(p).unwrap();
         (
             Into::<FileTime>::into(meta.accessed().unwrap()),
             Into::<FileTime>::into(meta.modified().unwrap()),
         )
     };
 
-    for entry in WalkDir::new(src_base) {
+    for entry in WalkDir::new(src_base).contents_first(true) {
         let p = entry.unwrap().into_path();
         let (atime, mtime) = am_times(&p);
         if p.is_symlink() {
@@ -141,8 +148,7 @@ fn test_copy_file_times<const N: usize>(#[case] paths: [&str; N]) {
         );
     }
 
-    let cp = CopierBuilder::default().filetimes(true).build().unwrap();
-    cp.copy(src_base, dst_base).unwrap();
+    te.copier().copy(src_base, dst_base).unwrap();
 
     for entry in WalkDir::new(dst_base) {
         let dst = entry.unwrap().into_path();
@@ -162,4 +168,54 @@ fn test_copy_file_times<const N: usize>(#[case] paths: [&str; N]) {
             dst.display()
         );
     }
+    te.assert_same_dir(src_base, dst_base);
+}
+
+#[rstest]
+#[case::simple(&SIMPLE)]
+#[case::mock_paths(&MOCK_PATHS)]
+fn test_copy_when_dry_run(#[case] paths: &[&str]) {
+    let te = TestEnv::new(paths);
+    let to = TempDir::new().unwrap();
+    let (src_base, dst_base) = (te.root(), to.path());
+
+    fs::create_dir_all(dst_base).unwrap();
+    let mut perm = dst_base.metadata().unwrap().permissions();
+    perm.set_readonly(true);
+    fs::set_permissions(dst_base, perm).unwrap();
+
+    let cp = CopierBuilder::default()
+        .dry_run(true)
+        .filetimes(true)
+        .build()
+        .unwrap();
+    let paths = cp.copy(src_base, dst_base).unwrap();
+    assert!(!paths.is_empty());
+}
+
+#[rstest]
+#[case::simple_paths(&SIMPLE, &SIMPLE[..1], &[],&[])]
+#[case::mock_paths(&MOCK_PATHS, &MOCK_PATHS, &[],&[])]
+fn test_sync_back<P: AsRef<Path>>(
+    #[case] srcs: &[P],
+    #[case] dsts: &[P],
+    #[case] last_dsts: &[P],
+    #[case] target_dsts: &[P],
+) {
+    let te = TestEnv::new(srcs)
+        .with_dsts(dsts)
+        .with_last_dsts(last_dsts)
+        .with_copier(CopierBuilder::default().build().unwrap());
+
+    let sync = SyncerBuilder::default()
+        .copier(te.copier().clone())
+        .last_dsts_srv(te.last_dsts_srv().unwrap().clone())
+        .dst(te.dst_root())
+        .src(te.root())
+        .non_interactive(true)
+        .build()
+        .unwrap();
+
+    let _paths = sync.sync_back(target_dsts).unwrap();
+    te.assert_synced(target_dsts);
 }

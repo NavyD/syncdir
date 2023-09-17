@@ -15,6 +15,7 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use derive_builder::Builder;
 use dialoguer::{theme::ColorfulTheme, Confirm};
 use filetime::FileTime;
+use getset::CopyGetters;
 use itertools::Itertools;
 use log::{debug, info, log_enabled, trace, warn};
 use sha2::{Digest, Sha256};
@@ -159,6 +160,15 @@ impl Syncer {
                     return Ok(Some(sync_path!(src, dst)));
                 }
 
+                if dst.is_symlink() || dst.is_file() {
+                    return Ok::<_, Error>(if self.confirm_rm(&dst)? {
+                        self.copier.copy_file(&src, &dst)?;
+                        Some(SyncPath::Overriden(src, dst))
+                    } else {
+                        None
+                    });
+                }
+
                 if !dst.exists() {
                     if src.is_dir() {
                         fs::create_dir_all(&dst)?;
@@ -169,21 +179,12 @@ impl Syncer {
                     return Ok(Some(SyncPath::Coppied(src, dst)));
                 }
 
-                if dst.is_dir() {
-                    return Ok(if src.is_dir() {
-                        self.copier.copy_metadata(&src, &dst)?;
-                        Some(SyncPath::Overriden(src, dst))
-                    } else if self.confirm_rm(&dst)? {
-                        fs::create_dir(&dst)?;
-                        self.copier.copy_metadata(&src, &dst)?;
-                        Some(SyncPath::Overriden(src, dst))
-                    } else {
-                        None
-                    });
-                }
-
-                Ok::<_, Error>(if self.confirm_rm(&dst)? {
-                    self.copier.copy_file(&src, &dst)?;
+                Ok(if src.is_dir() {
+                    self.copier.copy_metadata(&src, &dst)?;
+                    Some(SyncPath::Overriden(src, dst))
+                } else if self.confirm_rm(&dst)? {
+                    fs::create_dir(&dst)?;
+                    self.copier.copy_metadata(&src, &dst)?;
                     Some(SyncPath::Overriden(src, dst))
                 } else {
                     None
@@ -394,6 +395,16 @@ impl Syncer {
                     }));
                 }
 
+                // dst为文件/软链接时 移除src目录
+                if dst.is_symlink() || dst.is_file() {
+                    return Ok(if self.confirm_rm(&src)? {
+                        self.copier.copy_file(&dst, &src)?;
+                        Some(SyncPath::Overriden(dst, src))
+                    } else {
+                        None
+                    });
+                }
+
                 // dst不存在 移除src
                 if !dst.exists() {
                     return Ok(if self.confirm_rm(&src)? {
@@ -404,22 +415,12 @@ impl Syncer {
                 }
 
                 // dst目录时 当src是 不存在或目录则mkdir -p, 文件则移除
-                if dst.is_dir() {
-                    return Ok(if src.is_dir() {
-                        self.copier.copy_metadata(&dst, &src)?;
-                        Some(SyncPath::Overriden(dst, src))
-                    } else if self.confirm_rm(&src)? {
-                        fs::create_dir(&src)?;
-                        self.copier.copy_metadata(&dst, &src)?;
-                        Some(SyncPath::Overriden(dst, src))
-                    } else {
-                        None
-                    });
-                }
-
-                // dst为文件/软链接时 移除src目录
-                Ok(if self.confirm_rm(&src)? {
-                    self.copier.copy_file(&dst, &src)?;
+                Ok(if src.is_dir() {
+                    self.copier.copy_metadata(&dst, &src)?;
+                    Some(SyncPath::Overriden(dst, src))
+                } else if self.confirm_rm(&src)? {
+                    fs::create_dir(&src)?;
+                    self.copier.copy_metadata(&dst, &src)?;
                     Some(SyncPath::Overriden(dst, src))
                 } else {
                     None
@@ -579,8 +580,9 @@ impl Syncer {
     }
 }
 
-#[derive(Debug, Clone, Builder, Default)]
+#[derive(Debug, Clone, Builder, Default, CopyGetters)]
 #[builder(setter(into, strip_option), default)]
+#[getset(get = "pub", get_copy = "pub")]
 pub struct Copier {
     #[cfg(target_family = "unix")]
     mode: Option<u32>,
@@ -725,10 +727,7 @@ impl Copier {
         Q: AsRef<Path>,
     {
         let (from, to) = (from.as_ref(), to.as_ref());
-        if !from.is_file() {
-            bail!("Cannot found copy from file {}", from.display());
-        }
-        // if to.exists()
+
         if let Some(p) = to.parent().filter(|pp| !pp.exists()) {
             trace!("Creating all dir {}", p.display());
             fs::create_dir_all(p)?;
