@@ -85,7 +85,7 @@ fn init() {
 #[case(&DEFAULT_PATHS)]
 fn test_copy_simple(#[case] paths: &[&[&str]]) {
     let te = TestEnv::new(paths.iter().copied());
-    let src = te.root();
+    let src = te.src_root();
     let cp = te.copier();
     let test = |dst: &Path| {
         let dst_exists = dst.exists();
@@ -117,7 +117,7 @@ fn test_copy_file_times(#[case] paths: &[&[&str]]) {
     let te = TestEnv::new(paths.iter().copied())
         .with_copier(CopierBuilder::default().filetimes(true).build().unwrap());
     let to = TempDir::new().unwrap();
-    let (src_base, dst_base) = (te.root(), to.path());
+    let (src_base, dst_base) = (te.src_root(), to.path());
 
     let am_times = |p: &Path| {
         if p.is_symlink() {
@@ -193,7 +193,7 @@ fn test_copy_file_times(#[case] paths: &[&[&str]]) {
 fn test_copy_when_dry_run(#[case] paths: &[&[&str]]) {
     let te = TestEnv::new(paths.iter().copied());
     let to = TempDir::new().unwrap();
-    let (src_base, dst_base) = (te.root(), to.path());
+    let (src_base, dst_base) = (te.src_root(), to.path());
 
     fs::create_dir_all(dst_base).unwrap();
     let mut perm = dst_base.metadata().unwrap().permissions();
@@ -214,6 +214,7 @@ fn test_copy_when_dry_run(#[case] paths: &[&[&str]]) {
 // #[case::mock_paths(&MOCK_PATHS, &[], &[],&[])]
 // #[case::mock_paths(&MOCK_PATHS, &MOCK_PATHS, &[],&[])]
 // #[case::mock_paths(&MOCK_PATHS, &MOCK_PATHS[..10], &[],&[])]
+#[case::target_not_in_dsts(&DEFAULT_PATHS, &DEFAULT_PATHS[..5], &DEFAULT_PATHS.map(|v| v[0]), &["etc/openresty"])]
 #[case(&DEFAULT_PATHS, &DEFAULT_PATHS, &[&DEFAULT_PATHS.map(|v| v[0])[..], &SIMPLE.map(|v| v[0])].concat(), &["home", "boot", "etc/openresty"])]
 fn test_sync_back(
     #[case] srcs: &[&[&str]],
@@ -221,7 +222,6 @@ fn test_sync_back(
     #[case] last_dsts: &[&str],
     #[case] target_dsts: &[&str],
 ) {
-    // let a = ;
     let te = TestEnv::new(srcs.iter().copied())
         .with_dsts(dsts.iter().copied())
         .with_last_dsts(last_dsts)
@@ -231,7 +231,7 @@ fn test_sync_back(
         .copier(te.copier().clone())
         .last_dsts_srv(te.last_dsts_srv().unwrap().clone())
         .dst(te.dst_root())
-        .src(te.root())
+        .src(te.src_root())
         .non_interactive(true)
         .build()
         .unwrap();

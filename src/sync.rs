@@ -117,7 +117,15 @@ impl Syncer {
                 let mut res = vec![];
                 for dst in target_dsts {
                     let src = self.get_src_path(&dst)?;
-                    res.extend(self.copier.copy(dst, src)?);
+                    if !dst.exists() {
+                        warn!(
+                            "Skipped sync back from non exists dst {} to src {}",
+                            dst.display(),
+                            src.display()
+                        );
+                    } else {
+                        res.extend(self.copier.copy(dst, src)?);
+                    }
                 }
                 Ok(res)
             }

@@ -103,7 +103,7 @@ impl TestEnv {
         self
     }
 
-    pub fn root(&self) -> &Path {
+    pub fn src_root(&self) -> &Path {
         self.src.path()
     }
 
@@ -124,14 +124,16 @@ impl TestEnv {
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let (src, dst) = (self.root(), self.dst_root());
+        let (src, dst) = (self.src_root(), self.dst_root());
         let target_dsts = rel_target_dsts.into_iter().collect_vec();
         if target_dsts.is_empty() {
             self.assert_same_dir(src, dst);
         } else {
             for relp in target_dsts {
                 let (src, dst) = (src.join(&relp), dst.join(&relp));
-                self.assert_same_dir(src, dst);
+                if dst.exists() {
+                    self.assert_same_dir(src, dst);
+                }
             }
         }
     }
