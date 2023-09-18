@@ -72,17 +72,25 @@ impl Syncer {
     ///     * 否则比较是否改变
     ///         * 如果src与dst文件不同则覆盖src文件
     ///         * 否则跳过
+    ///
+    /// 如果target_dsts是相对路径则是相对[Self::dst]
     pub fn sync_back<T, P>(&self, target_dsts: T) -> Result<Vec<SyncPath>>
     where
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let target_dsts = target_dsts.into_iter().collect_vec();
-        if let Some(p) = target_dsts
-            .iter()
-            .map(AsRef::as_ref)
-            .find(|p| !p.starts_with(&self.dst))
-        {
+        let target_dsts = target_dsts
+            .into_iter()
+            .map(|p| {
+                let p = p.as_ref();
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.dst.join(p)
+                }
+            })
+            .collect_vec();
+        if let Some(p) = target_dsts.iter().find(|p| !p.starts_with(&self.dst)) {
             bail!(
                 "Found a target dst {} not start with dst {}",
                 p.display(),

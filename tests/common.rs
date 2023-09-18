@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Error, Result};
 use filetime::FileTime;
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
@@ -16,32 +16,23 @@ use syncdir::{
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::WalkDir;
 
-pub struct TmpTree {
-    root: TempDir,
-    /// 创建的目录树不包含symlinks
-    dir: PathBuf,
-    /// 链接到目录树的symlinks 目录
-    sym_dir: PathBuf,
-    /// 不可用的symlinks 目录
-    bad_sym_dir: Option<PathBuf>,
-}
-
 pub struct TestEnv {
     last_dsts_holder: Option<(NamedTempFile, LastDestinationListService)>,
 
-    dst: Option<TmpTree>,
-    src: TmpTree,
+    dst: Option<TempDir>,
+    src: TempDir,
     copier: Copier,
 }
 
 impl TestEnv {
-    pub fn new<T, P>(rel_srcs: T) -> Self
+    pub fn new<T, I, P>(rel_srcs: T) -> Self
     where
+        T: IntoIterator<Item = I>,
+        I: IntoIterator<Item = P>,
         P: AsRef<Path>,
-        T: IntoIterator<Item = P>,
     {
         Self {
-            src: create_tree(rel_srcs, false).expect("create dir tree"),
+            src: create_tree(rel_srcs, Some("syncdir-src-")).expect("create dir tree"),
             last_dsts_holder: None,
             dst: None,
             copier: CopierBuilder::default().build().unwrap(),
@@ -53,19 +44,20 @@ impl TestEnv {
     where
         F: Fn(&Path) -> Result<()>,
     {
-        WalkDir::new(self.src.root.path())
+        WalkDir::new(self.src.path())
             .into_iter()
             .try_for_each(|entry| mod_fn(&entry?.into_path()))
             .unwrap();
         self
     }
 
-    pub fn with_dsts<T, P>(mut self, rel_dsts: T) -> Self
+    pub fn with_dsts<T, I, P>(mut self, rel_dsts: T) -> Self
     where
+        T: IntoIterator<Item = I>,
+        I: IntoIterator<Item = P>,
         P: AsRef<Path>,
-        T: IntoIterator<Item = P>,
     {
-        let dst = create_tree(rel_dsts, self.src.bad_sym_dir.is_some()).unwrap();
+        let dst = create_tree(rel_dsts, Some("syncdir-dst-")).unwrap();
         self.dst = Some(dst);
         self
     }
@@ -79,11 +71,11 @@ impl TestEnv {
 
     pub fn with_last_dsts<T, P>(mut self, rel_last_dsts: T) -> Self
     where
-        P: AsRef<Path>,
         T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
     {
         let tmp_last_dst = tempfile::Builder::new()
-            .prefix("syncdir-last-dsts")
+            .prefix("syncdir-last-dsts-")
             .tempfile()
             .unwrap();
         let last_dsts_srv = LastDestinationListServiceBuilder::default()
@@ -93,14 +85,18 @@ impl TestEnv {
 
         let paths = rel_last_dsts
             .into_iter()
-            .flat_map(|p| {
-                let mut v = vec![self.src.dir.join(p.as_ref()), self.src.sym_dir.join(&p)];
-                if let Some(bad_sym_dir) = &self.src.bad_sym_dir {
-                    v.push(bad_sym_dir.join(p))
+            .map(|p| {
+                let p = p.as_ref();
+                if p.is_absolute() {
+                    bail!("Found absolute path {}", p.display());
                 }
-                v.into_iter()
+                self.dst
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Not found dst for last dsts"))
+                    .map(|dst| dst.path().join(p))
             })
-            .collect_vec();
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
 
         last_dsts_srv.save_last_dsts(&paths).unwrap();
         self.last_dsts_holder = Some((tmp_last_dst, last_dsts_srv));
@@ -108,11 +104,11 @@ impl TestEnv {
     }
 
     pub fn root(&self) -> &Path {
-        self.src.root.path()
+        self.src.path()
     }
 
     pub fn dst_root(&self) -> &Path {
-        self.dst.as_ref().unwrap().root.path()
+        self.dst.as_ref().unwrap().path()
     }
 
     pub fn copier(&self) -> &Copier {
@@ -125,15 +121,15 @@ impl TestEnv {
 
     pub fn assert_synced<T, P>(&self, rel_target_dsts: T)
     where
-        P: AsRef<Path>,
         T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
     {
-        let (src, dst) = (self.src.root.path(), self.dst.as_ref().unwrap().root.path());
-        let rel_target_dsts = rel_target_dsts.into_iter().collect_vec();
-        if rel_target_dsts.is_empty() {
+        let (src, dst) = (self.root(), self.dst_root());
+        let target_dsts = rel_target_dsts.into_iter().collect_vec();
+        if target_dsts.is_empty() {
             self.assert_same_dir(src, dst);
         } else {
-            for relp in rel_target_dsts {
+            for relp in target_dsts {
                 let (src, dst) = (src.join(&relp), dst.join(&relp));
                 self.assert_same_dir(src, dst);
             }
@@ -288,69 +284,79 @@ impl TestEnv {
     }
 }
 
-fn create_tree<P, T>(rel_paths: T, bad_symlink: bool) -> Result<TmpTree>
+/// 创建一个目录树
+///
+/// * 使用嵌入的paths表示对路径`paths[0]`进行多级链接
+/// * `paths[0]`通过是否存在后缀，区分创建的是dir还是file
+/// * 如果`paths[0].ext == N`则表示不会创建这个路径，用于表示错误的symlink
+/// * 所有的paths必须是相对路径
+pub fn create_tree<T, I, P>(rel_paths: T, prefix: Option<&str>) -> Result<TempDir>
 where
-    T: IntoIterator<Item = P>,
+    T: IntoIterator<Item = I>,
+    I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    let tmpdir = tempfile::Builder::new().prefix("syncdir-tests").tempdir()?;
-    let root = tmpdir.path();
-    let dir = root.join("tree");
-    let sym_dir = root.join("symlinks");
-    let bad_sym_src_dir = root.join("bad-symlinks-src");
-    let bad_sym_dst_dir = root.join("bad-symlinks-dst");
-
-    for relp in rel_paths {
-        let relp = relp.as_ref();
-        if relp.is_absolute() {
-            bail!(
-                "Absolute path {} not allowed for create temp tree",
-                relp.display()
-            );
+    let root = {
+        let mut b = tempfile::Builder::new();
+        if let Some(prefix) = prefix {
+            b.prefix(prefix);
         }
+        b.tempdir()?
+    };
 
-        let p = dir.join(relp);
+    let create_dir_or_file = |p: &Path| {
         if let Some(pp) = p.parent() {
             fs::create_dir_all(pp)?;
         }
-        if p.extension().is_some() {
-            fs::write(&p, p.display().to_string())?;
+        if let Some(ext) = p.extension() {
+            if ext.to_str() == Some("N") {
+                return Ok(());
+            }
+            fs::write(p, p.display().to_string())?;
         } else {
-            fs::create_dir(&p)?;
+            fs::create_dir(p)?;
+        }
+        Ok::<_, Error>(())
+    };
+
+    for paths in rel_paths {
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .map(|p| {
+                let p: &Path = p.as_ref();
+                if p.is_absolute() {
+                    Err(anyhow!(
+                        "Found absolute path {} for create tree",
+                        p.display()
+                    ))
+                } else {
+                    Ok(root.path().join(p))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if paths.is_empty() {
+            bail!("Found empty nest paths")
         }
 
-        let dst = sym_dir.join(relp);
-        if let Some(pp) = dst.parent() {
-            fs::create_dir_all(pp)?;
-        }
-        if !p.exists() {
-            bail!("Not found exists src path {} for symlink", p.display());
-        }
-        unix::fs::symlink(p, dst)?;
+        let p = &paths[0];
+        create_dir_or_file(p)?;
 
-        if bad_symlink {
-            let dst = bad_sym_dst_dir.join(relp);
-            if let Some(pp) = dst.parent() {
+        let mut from = p;
+        // create multi link for p
+        for to in &paths[1..] {
+            if to.is_symlink() || to.is_file() {
+                fs::remove_file(to)?;
+            } else if to.is_dir() {
+                fs::remove_dir(to)?;
+            } else if let Some(pp) = to.parent() {
                 fs::create_dir_all(pp)?;
             }
-            let src = bad_sym_src_dir.join(relp);
-            if src.is_symlink() || src.exists() {
-                bail!("Found exists src path {} for bad symlink", src.display());
-            }
-            unix::fs::symlink(src, dst)?;
+            unix::fs::symlink(from, to)?;
+
+            from = to;
         }
     }
-
-    Ok(TmpTree {
-        root: tmpdir,
-        dir,
-        sym_dir,
-        bad_sym_dir: if bad_symlink {
-            Some(bad_sym_dst_dir)
-        } else {
-            None
-        },
-    })
+    Ok(root)
 }
 
 fn metadata(p: impl AsRef<Path>) -> io::Result<fs::Metadata> {

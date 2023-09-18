@@ -12,34 +12,61 @@ use walkdir::WalkDir;
 
 mod common;
 
-use std::{fs, io, path::Path, sync::Once};
+use std::{fs, path::Path, sync::Once};
 
 use log::LevelFilter;
 
-static EMPTY: [&str; 0] = [];
-static ONLY_FILES: [&str; 2] = ["a.t", "b.t"];
-static SIMPLE: [&str; 3] = ["a/b/c/1.t", "a/b/2.t", "d/e/3.t"];
-static MOCK_PATHS: [&str; 20] = [
-    "usr/local/lib/systemd/system/clash.service",
-    "etc/network",
-    "etc/docker/daemon.json",
-    "etc/systemd/system",
-    "etc/wsl.conf",
-    "etc/default.t",
-    "etc/netdata/charts.d.conf",
-    "etc/netdata/go.d/wmi.conf",
-    "etc/netdata/go.d/postgres.conf",
-    "etc/netdata/go.d/prometheus.conf",
-    "etc/netdata/go.d.conf",
-    "etc/netdata/apps_groups.conf",
-    "etc/netdata/netdata.conf",
-    "etc/sudoers.d/010_nopasswd.t",
-    "etc/cron.d/backup-sync.t",
-    "etc/openresty/sites-enabled/default.t",
-    "etc/openresty/nginx.conf",
-    "etc/openresty/sites-available/portainer.navyd.xyz.conf",
-    "etc/openresty/sites-available/m.navyd.xyz.conf",
-    "etc/openresty/sites-available/p.navyd.xyz.conf",
+static SIMPLE: [&[&str]; 3] = [&["a/b/c/1.t"], &["a/b/2.t"], &["d/e/3.t"]];
+static DEFAULT_PATHS: [&[&str]; 35] = [
+    &["boot/cmdline.txt"],
+    &["boot/config.txt"],
+    &["home/git/.ssh/authorized_keys"],
+    &["home/git/.ssh/id_ed25519.pub"],
+    &["var", "symlinks-var"],
+    &["var/www/ariang/public/css/bootstrap-3.4.1.min.css"],
+    &["var/www/ariang/public/index.html"],
+    &["var/www/ariang/public/js/angular-packages-1.6.10.min.js"],
+    &["var/www/ariang/public/robots.txt"],
+    &["var/www/yacd/public/assets/Config-35023b66.css"],
+    &["var/www/yacd/public/index.html"],
+    &["usr/local/lib/systemd/system/frpc.service"],
+    &["usr/local/lib/systemd/system/clash.service"],
+    // empty dir link
+    &["etc/network", "etc/symlinks/network"],
+    // ext N: not create file
+    &[
+        "etc/badnetwork.N",
+        "etc/badsymlinks/badnetwork",
+        "etc/symlinks/badnetwork",
+    ],
+    &["etc/docker/daemon.json"],
+    &["etc/systemd/system"],
+    &["etc/wsl.conf"],
+    &["etc/default.t"],
+    &["etc/netdata", "etc/symlinks/netdata"],
+    &["etc/netdata/charts.d.conf"],
+    &["etc/netdata/go.d/wmi.conf"],
+    &["etc/netdata/go.d/postgres.conf"],
+    &["etc/netdata/go.d/prometheus.conf"],
+    &["etc/netdata/go.d.conf"],
+    &["etc/netdata/apps_groups.conf"],
+    &["etc/netdata/netdata.conf"],
+    &["etc/sudoers.d/010_nopasswd.t"],
+    &["etc/cron.d/backup-sync.t"],
+    &["etc/openresty", "etc/symlinks/openresty"],
+    &["etc/openresty/sites-enabled/default.t"],
+    &["etc/openresty/nginx.conf"],
+    &["etc/openresty/sites-available/portainer.navyd.xyz.conf"],
+    &[
+        "etc/openresty/sites-available/m.navyd.xyz.conf",
+        "etc/openresty/sites-enabled/m.navyd.xyz.conf",
+    ],
+    &[
+        "etc/openresty/sites-available/p.navyd.xyz.conf",
+        "etc/openresty/sites-enabled/p.navyd.xyz.conf",
+        // multi link to one path
+        "etc/symlinks/multi-link.p.navyd.xyz.conf",
+    ],
 ];
 
 #[ctor::ctor]
@@ -54,22 +81,10 @@ fn init() {
     });
 }
 
-fn metadata(p: impl AsRef<Path>) -> io::Result<fs::Metadata> {
-    let p = p.as_ref();
-    if p.is_symlink() {
-        p.symlink_metadata()
-    } else {
-        p.metadata()
-    }
-}
-
 #[rstest]
-#[case::empty(&EMPTY)]
-#[case::simple(&SIMPLE)]
-#[case::only_files(&ONLY_FILES)]
-#[case::mock_paths(&MOCK_PATHS)]
-fn test_copy_simple(#[case] paths: &[&str]) {
-    let te = TestEnv::new(paths);
+#[case(&DEFAULT_PATHS)]
+fn test_copy_simple(#[case] paths: &[&[&str]]) {
+    let te = TestEnv::new(paths.iter().copied());
     let src = te.root();
     let cp = te.copier();
     let test = |dst: &Path| {
@@ -97,13 +112,10 @@ fn test_copy_simple(#[case] paths: &[&str]) {
 }
 
 #[rstest]
-#[case::empty(&EMPTY)]
-#[case::simple(&SIMPLE)]
-#[case::only_files(&ONLY_FILES)]
-#[case::mock_paths(&MOCK_PATHS)]
-fn test_copy_file_times(#[case] paths: &[&str]) {
-    let te =
-        TestEnv::new(paths).with_copier(CopierBuilder::default().filetimes(true).build().unwrap());
+#[case(&DEFAULT_PATHS)]
+fn test_copy_file_times(#[case] paths: &[&[&str]]) {
+    let te = TestEnv::new(paths.iter().copied())
+        .with_copier(CopierBuilder::default().filetimes(true).build().unwrap());
     let to = TempDir::new().unwrap();
     let (src_base, dst_base) = (te.root(), to.path());
 
@@ -124,7 +136,12 @@ fn test_copy_file_times(#[case] paths: &[&str]) {
     };
 
     let get_am_times = |p: &Path| {
-        let meta = metadata(p).unwrap();
+        let meta = if p.is_symlink() {
+            p.symlink_metadata()
+        } else {
+            p.metadata()
+        }
+        .unwrap();
         (
             Into::<FileTime>::into(meta.accessed().unwrap()),
             Into::<FileTime>::into(meta.modified().unwrap()),
@@ -172,10 +189,9 @@ fn test_copy_file_times(#[case] paths: &[&str]) {
 }
 
 #[rstest]
-#[case::simple(&SIMPLE)]
-#[case::mock_paths(&MOCK_PATHS)]
-fn test_copy_when_dry_run(#[case] paths: &[&str]) {
-    let te = TestEnv::new(paths);
+#[case(&DEFAULT_PATHS)]
+fn test_copy_when_dry_run(#[case] paths: &[&[&str]]) {
+    let te = TestEnv::new(paths.iter().copied());
     let to = TempDir::new().unwrap();
     let (src_base, dst_base) = (te.root(), to.path());
 
@@ -194,16 +210,20 @@ fn test_copy_when_dry_run(#[case] paths: &[&str]) {
 }
 
 #[rstest]
-#[case::simple_paths(&SIMPLE, &SIMPLE[..1], &[],&[])]
-#[case::mock_paths(&MOCK_PATHS, &MOCK_PATHS, &[],&[])]
-fn test_sync_back<P: AsRef<Path>>(
-    #[case] srcs: &[P],
-    #[case] dsts: &[P],
-    #[case] last_dsts: &[P],
-    #[case] target_dsts: &[P],
+// #[case::all(&MOCK_PATHS, &MOCK_PATHS[..10], &[&MOCK_PATHS[..], &SIMPLE[..]].concat(), &["etc"])]
+// #[case::mock_paths(&MOCK_PATHS, &[], &[],&[])]
+// #[case::mock_paths(&MOCK_PATHS, &MOCK_PATHS, &[],&[])]
+// #[case::mock_paths(&MOCK_PATHS, &MOCK_PATHS[..10], &[],&[])]
+#[case(&DEFAULT_PATHS, &DEFAULT_PATHS, &[&DEFAULT_PATHS.map(|v| v[0])[..], &SIMPLE.map(|v| v[0])].concat(), &["home", "boot", "etc/openresty"])]
+fn test_sync_back(
+    #[case] srcs: &[&[&str]],
+    #[case] dsts: &[&[&str]],
+    #[case] last_dsts: &[&str],
+    #[case] target_dsts: &[&str],
 ) {
-    let te = TestEnv::new(srcs)
-        .with_dsts(dsts)
+    // let a = ;
+    let te = TestEnv::new(srcs.iter().copied())
+        .with_dsts(dsts.iter().copied())
         .with_last_dsts(last_dsts)
         .with_copier(CopierBuilder::default().build().unwrap());
 
