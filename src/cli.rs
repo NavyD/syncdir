@@ -1,8 +1,8 @@
 use std::{fs, path::PathBuf};
 
 use crate::{
-    service::LastDestinationListServiceBuilder,
-    sync::{SyncPath, Syncer, SyncerBuilder},
+    service::{LastDestinationListService, LastDestinationListServiceBuilder},
+    sync::{SyncPath, Syncer, SyncerBuilder}, CRATE_NAME,
 };
 use anyhow::{bail, Result};
 use clap::{value_parser, Parser, Subcommand};
@@ -27,7 +27,6 @@ pub struct Opts {
 
 impl Opts {
     pub fn run(&self) -> Result<()> {
-        self.validate()?;
         self.set_log()?;
 
         match &self.command {
@@ -37,27 +36,7 @@ impl Opts {
             OptCommand::Sync { sub_opts } => {
                 self.sync(sub_opts)?;
             }
-            _ => todo!(),
-        }
-        Ok(())
-    }
-
-    fn validate(&self) -> Result<()> {
-        let mut paths = vec![&self.config_dir];
-        match &self.command {
-            OptCommand::Apply { sub_opts: sub_args } | OptCommand::Sync { sub_opts: sub_args } => {
-                paths.push(&sub_args.src);
-                paths.push(&sub_args.dst);
-                if let Some(t) = &sub_args.target_dsts {
-                    paths.extend(t)
-                }
-            }
-            _ => {}
-        }
-        for p in paths {
-            if !p.exists() {
-                bail!("Not found path {}", p.display());
-            }
+            OptCommand::List => self.list()?,
         }
         Ok(())
     }
@@ -75,11 +54,27 @@ impl Opts {
         T: IntoIterator<Item = &'a SyncPath>,
     {
         if self.verbose < 1 {
-            return
+            return;
         }
         for p in paths {
             println!("{}", self.format_syncpath(p));
         }
+    }
+
+    fn list(&self) -> Result<()> {
+        let srv = self.build_last_dsts_srv()?;
+        if let Some(paths) = srv.load_last_dsts_in_targets(&[] as &[&str])? {
+            for p in &paths {
+                println!("{}", p.display());
+            }
+            println!("Found {} last dsts", paths.len());
+        } else {
+            println!(
+                "Not found last dsts in config dir {}",
+                self.config_dir.display()
+            );
+        }
+        Ok(())
     }
 
     fn sync(&self, sub_opts: &SubOpts) -> Result<()> {
@@ -150,8 +145,16 @@ impl Opts {
         env_logger::builder()
             .filter_level(LevelFilter::Error)
             .filter_module(module_path!(), level)
+            .filter_module(CRATE_NAME, level)
             .init();
         Ok(())
+    }
+
+    fn build_last_dsts_srv(&self) -> Result<LastDestinationListService> {
+        LastDestinationListServiceBuilder::default()
+            .path(self.config_dir.join("last-dsts"))
+            .build()
+            .map_err(Into::into)
     }
 
     fn build_syncer(&self, sub_opts: &SubOpts) -> Result<Syncer> {
@@ -159,9 +162,7 @@ impl Opts {
             debug!("Creating config dir in {}", self.config_dir.display());
             fs::create_dir_all(&self.config_dir)?;
         }
-        let last_dsts_srv = LastDestinationListServiceBuilder::default()
-            .path(self.config_dir.join("last-dsts"))
-            .build()?;
+        let last_dsts_srv = self.build_last_dsts_srv()?;
         SyncerBuilder::default()
             .src(sub_opts.src.canonicalize()?)
             .dst(sub_opts.dst.canonicalize()?)
@@ -211,6 +212,7 @@ enum OptCommand {
         sub_opts: SubOpts,
     },
 
+    /// 打印last dsts
     List,
 }
 

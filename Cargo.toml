@@ -17,8 +17,6 @@ getset = "0.1.2"
 globset = "0.4.13"
 itertools = "0.11.0"
 log = "0.4.20"
-# mlua = { version = "0.9.0", features = ["luajit52", "vendored"] }
-rayon = "1.7.0"
 sha2 = "0.10.7"
 walkdir = "2.3.3"
 
@@ -28,7 +26,7 @@ nix = { version = "0.27.1", features = ["user", "fs"] }
 
 [profile.release]
 strip = true      # Automatically strip symbols from the binary.
-opt-level = "z"   # Optimize for size.
+# opt-level = "z"   # Optimize for size.
 lto = true
 codegen-units = 1
 
