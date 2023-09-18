@@ -142,7 +142,7 @@ impl Syncer {
     /// 将src中的文件同步到指定的target_dsts中。扫描src目录，并找到对应的dst目录dsts，
     /// 将src存在的文件复制到dsts中
     ///
-    /// 类似[Self::sync_back_with_src()]
+    /// 如果target_dsts是相对路径则是相对[Self::dst]
     ///
     /// ## Errors
     ///
@@ -153,7 +153,17 @@ impl Syncer {
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let target_dsts = target_dsts.into_iter().collect_vec();
+        let target_dsts = target_dsts
+            .into_iter()
+            .map(|p| {
+                let p = p.as_ref();
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.dst.join(p)
+                }
+            })
+            .collect_vec();
         WalkDir::new(&self.src)
             .into_iter()
             .map(|entry| {
@@ -186,7 +196,7 @@ impl Syncer {
                 }
 
                 if !dst.exists() {
-                    if src.is_dir() {
+                    if !src.is_symlink() && src.is_dir() {
                         fs::create_dir_all(&dst)?;
                         self.copier.copy_metadata(&src, &dst)?;
                     } else {
@@ -195,7 +205,7 @@ impl Syncer {
                     return Ok(Some(SyncPath::Coppied(src, dst)));
                 }
 
-                Ok(if src.is_dir() {
+                Ok(if !src.is_symlink() && src.is_dir() {
                     self.copier.copy_metadata(&src, &dst)?;
                     Some(SyncPath::Overriden(src, dst))
                 } else if self.confirm_rm(&dst)? {
@@ -754,9 +764,17 @@ impl Copier {
             } else if to.is_dir() {
                 fs::remove_dir(to)?;
             }
-            let fromp = from.read_link()?;
+            let fromp = from
+                .read_link()
+                .with_context(|| format!("failed to read link {}", from.display()))?;
             trace!("Copying sym link {} -> {}", fromp.display(), to.display());
-            symlink(fromp, to)?;
+            symlink(&fromp, to).with_context(|| {
+                format!(
+                    "Failed to sym link from {} to {}",
+                    fromp.display(),
+                    to.display()
+                )
+            })?;
         } else {
             trace!("Copying file {} -> {}", from.display(), to.display());
             fs::copy(from, to)?;
@@ -857,7 +875,8 @@ impl Copier {
         Q: AsRef<Path>,
     {
         let (from, to) = (from.as_ref(), to.as_ref());
-        let meta = from.metadata()?;
+
+        let meta = self.metadata(from)?;
 
         #[cfg(target_family = "unix")]
         {
@@ -884,6 +903,15 @@ impl Copier {
             }
         }
         Ok(())
+    }
+
+    fn metadata<P: AsRef<Path>>(&self, p: P) -> io::Result<fs::Metadata> {
+        let p = p.as_ref();
+        if p.is_symlink() && !self.follow_symlinks {
+            p.symlink_metadata()
+        } else {
+            p.metadata()
+        }
     }
 
     fn copy_filetimes<P, Q>(&self, from: P, to: Q) -> Result<()>

@@ -155,21 +155,45 @@ impl TestEnv {
             .map(|e| e.map(|p| p.into_path()))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        if srcs.len() != dsts.len() {
-            return;
-        }
 
         assert_eq!(
-            srcs.iter().filter(|p| p.is_symlink()).count(),
-            dsts.iter().filter(|p| p.is_symlink()).count()
+            srcs.iter()
+                .filter(|p| p.is_symlink())
+                .flat_map(|p| p.strip_prefix(src))
+                .collect_vec(),
+            dsts.iter()
+                .filter(|p| p.is_symlink())
+                .flat_map(|p| p.strip_prefix(dst))
+                .collect_vec(),
+            "diff symlinks in src {}, dst {}",
+            src.display(),
+            dst.display(),
         );
         assert_eq!(
-            srcs.iter().filter(|p| p.is_dir()).count(),
-            dsts.iter().filter(|p| p.is_dir()).count()
+            srcs.iter()
+                .filter(|p| p.is_dir())
+                .flat_map(|p| p.strip_prefix(src))
+                .collect_vec(),
+            dsts.iter()
+                .filter(|p| p.is_dir())
+                .flat_map(|p| p.strip_prefix(dst))
+                .collect_vec(),
+            "diff dirs in src {}, dst {}",
+            src.display(),
+            dst.display(),
         );
         assert_eq!(
-            srcs.iter().filter(|p| p.is_file()).count(),
-            dsts.iter().filter(|p| p.is_file()).count()
+            srcs.iter()
+                .filter(|p| p.is_file())
+                .flat_map(|p| p.strip_prefix(src))
+                .collect_vec(),
+            dsts.iter()
+                .filter(|p| p.is_file())
+                .flat_map(|p| p.strip_prefix(dst))
+                .collect_vec(),
+            "diff files in src {}, dst {}",
+            src.display(),
+            dst.display(),
         );
 
         let rel_srcs = srcs
@@ -184,12 +208,8 @@ impl TestEnv {
             .unwrap();
         assert_eq!(rel_srcs, rel_dsts);
 
-        for i in 0..srcs.len() {
-            assert_eq!(
-                srcs[i].strip_prefix(src).unwrap(),
-                dsts[i].strip_prefix(dst).unwrap()
-            );
-            self.assert_same_path(&srcs[i], &dsts[i]);
+        for relp in rel_srcs {
+            self.assert_same_path(src.join(relp), dst.join(relp));
         }
     }
 

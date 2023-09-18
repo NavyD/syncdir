@@ -239,3 +239,30 @@ fn test_sync_back(
     let _paths = sync.sync_back(target_dsts).unwrap();
     te.assert_synced(target_dsts);
 }
+
+#[rstest]
+#[case(&DEFAULT_PATHS, &[], &[], &[])]
+#[case(&DEFAULT_PATHS, &DEFAULT_PATHS, &[&DEFAULT_PATHS.map(|v| v[0])[..], &SIMPLE.map(|v| v[0])].concat(), &["home", "boot", "etc/openresty"])]
+fn test_apply_to_dst(
+    #[case] srcs: &[&[&str]],
+    #[case] dsts: &[&[&str]],
+    #[case] last_dsts: &[&str],
+    #[case] target_dsts: &[&str],
+) {
+    let te = TestEnv::new(srcs.iter().copied())
+        .with_dsts(dsts.iter().copied())
+        .with_last_dsts(last_dsts)
+        .with_copier(CopierBuilder::default().build().unwrap());
+
+    let sync = SyncerBuilder::default()
+        .copier(te.copier().clone())
+        .last_dsts_srv(te.last_dsts_srv().unwrap().clone())
+        .dst(te.dst_root())
+        .src(te.src_root())
+        .non_interactive(true)
+        .build()
+        .unwrap();
+
+    let _paths = sync.apply_to_dst(target_dsts).unwrap();
+    te.assert_synced(target_dsts);
+}
