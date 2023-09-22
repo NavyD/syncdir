@@ -65,8 +65,10 @@ impl Opts {
     fn list(&self) -> Result<()> {
         let srv = self.build_last_dsts_srv()?;
         if let Some(paths) = srv.load_last_dsts_in_targets(&[] as &[&str])? {
-            for p in &paths {
-                println!("{}", p.display());
+            if self.verbose >= 1 {
+                for p in &paths {
+                    println!("{}", p.display());
+                }
             }
             println!("Found {} last dsts", paths.len());
         } else {
