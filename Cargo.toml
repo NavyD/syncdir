@@ -6,22 +6,21 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.75"
-clap = { version = "4.4.2", features = ["derive", "string"] }
-derive_builder = "0.12.0"
-dialoguer = "0.10.4"
-directories = "5.0.1"
-env_logger = "0.10.0"
-filetime = "0.2.22"
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive", "string"] }
+derive_builder = "0.12"
+dialoguer = "0.11"
+directories = "5.0"
+log = "0.4"
+env_logger = "0.10"
+filetime = "0.2"
 getset = "0.1.2"
-globset = "0.4.13"
-itertools = "0.11.0"
-log = "0.4.20"
+itertools = "0.11"
 sha2 = "0.10.7"
-walkdir = "2.3.3"
+walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.27.1", features = ["user", "fs"] }
+nix = { version = "0.27", features = ["user", "fs"] }
 
 
 [profile.release]
