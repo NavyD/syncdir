@@ -1080,7 +1080,7 @@ fn confirm_rm<P: AsRef<Path>>(src: P, dst: P, non_interactive: bool) -> Result<b
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use once_cell::sync::Lazy;
     use pretty_assertions::assert_eq;
@@ -1817,7 +1817,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod clean_tests {
     use super::*;
 
