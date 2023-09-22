@@ -145,7 +145,6 @@ impl Opts {
         };
         env_logger::builder()
             .filter_level(LevelFilter::Error)
-            .filter_module(module_path!(), level)
             .filter_module(CRATE_NAME, level)
             .init();
         Ok(())
