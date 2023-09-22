@@ -1,6 +1,5 @@
 use std::{
     fs, io,
-    os::unix,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -268,15 +267,18 @@ impl TestEnv {
         }
 
         // assert perms
-        let (src_meta, dst_meta) = (metadata(src).unwrap(), metadata(dst).unwrap());
-        if let Some(mode) = self.copier.mode() {
-            use std::os::unix::fs::PermissionsExt;
-            let mut src_perm = src_meta.permissions();
-            src_perm.set_mode(mode);
-            assert_eq!(src_perm, dst_meta.permissions())
-        } else {
-            // 默认复制权限
-            assert_eq!(src_meta.permissions(), dst_meta.permissions());
+        #[cfg(unix)]
+        {
+            let (src_meta, dst_meta) = (metadata(src).unwrap(), metadata(dst).unwrap());
+            if let Some(mode) = self.copier.mode() {
+                use std::os::unix::fs::PermissionsExt;
+                let mut src_perm = src_meta.permissions();
+                src_perm.set_mode(mode);
+                assert_eq!(src_perm, dst_meta.permissions())
+            } else {
+                // 默认复制权限
+                assert_eq!(src_meta.permissions(), dst_meta.permissions());
+            }
         }
     }
 
@@ -390,8 +392,18 @@ where
             } else if let Some(pp) = to.parent() {
                 fs::create_dir_all(pp)?;
             }
-            unix::fs::symlink(from, to)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(from, to)?;
 
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs;
+                if from.is_dir() {
+                    fs::symlink_dir(from, to)?;
+                } else {
+                    fs::symlink_file(from, to)?;
+                }
+            }
             from = to;
         }
     }

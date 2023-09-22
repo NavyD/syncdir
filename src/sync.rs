@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     fmt::{Debug, Display},
     fs, io,
-    os::unix::fs::symlink,
     path::{Path, PathBuf},
 };
 #[cfg(target_family = "unix")]
@@ -781,7 +780,7 @@ impl Copier {
                     fs::create_dir_all(p)?;
                 }
                 if src.is_symlink() {
-                    symlink(src.read_link()?, &dst)?;
+                    util::symlink(src.read_link()?, &dst)?;
                 } else if src.is_dir() {
                     if dst.is_symlink() || dst.is_file() {
                         fs::remove_file(&dst)?;
@@ -842,7 +841,7 @@ impl Copier {
                 .read_link()
                 .with_context(|| format!("failed to read link {}", from.display()))?;
             trace!("Copying sym link {} -> {}", fromp.display(), to.display());
-            symlink(&fromp, to).with_context(|| {
+            util::symlink(&fromp, to).with_context(|| {
                 format!(
                     "Failed to sym link from {} to {}",
                     fromp.display(),
@@ -903,10 +902,9 @@ impl Copier {
             )
         };
 
-        let (new_meta, old_meta) = (new.metadata()?, old.metadata()?);
-
         #[cfg(target_family = "unix")]
         {
+            let (new_meta, old_meta) = (new.metadata()?, old.metadata()?);
             if (self.mode.is_some()
                 && new_meta.permissions().mode() != old_meta.permissions().mode())
                 || (self.uid.is_some() && new_meta.uid() != old_meta.uid())
@@ -948,12 +946,10 @@ impl Copier {
         P: AsRef<Path>,
         Q: AsRef<Path>,
     {
-        let (from, to) = (from.as_ref(), to.as_ref());
-
-        let meta = self.metadata(from)?;
-
         #[cfg(target_family = "unix")]
         {
+            let (from, to) = (from.as_ref(), to.as_ref());
+            let meta = self.metadata(from)?;
             // setup rights
             if let Some(mode) = self.mode {
                 let mut perm = meta.permissions();
@@ -1095,7 +1091,6 @@ mod tests {
     use super::*;
     use std::{
         fs::File,
-        os::unix::fs::symlink,
         thread,
         time::{Duration, SystemTime},
     };
@@ -1151,7 +1146,7 @@ mod tests {
             if let Some(p) = to.as_ref().parent() {
                 fs::create_dir_all(p)?;
             }
-            symlink(from, to)?;
+            util::symlink(from, to)?;
             // res.push((from, to))
         }
         // Ok(res)
@@ -1316,6 +1311,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_metadata_mode() {
         let mut default_cp = Copier::default();
         let mode = 0o777;
@@ -1415,7 +1411,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&src).unwrap(), s);
 
         assert!(!plink.exists());
-        symlink(&src, &plink).unwrap();
+        util::symlink(&src, &plink).unwrap();
         assert!(plink.is_symlink());
 
         let copier = Copier::default();
@@ -1562,7 +1558,7 @@ mod tests {
                     plink.display(),
                     newplink.display()
                 );
-                symlink(newplink, p).unwrap();
+                util::symlink(newplink, p).unwrap();
                 assert!(p.is_symlink());
                 p
             })
@@ -1788,7 +1784,7 @@ mod tests {
                     plink.display(),
                     newplink.display()
                 );
-                symlink(newplink, p).unwrap();
+                util::symlink(newplink, p).unwrap();
                 assert!(p.is_symlink());
                 p
             })
@@ -1823,8 +1819,6 @@ mod tests {
 
 #[cfg(test)]
 mod clean_tests {
-    use std::os::unix::prelude::PermissionsExt;
-
     use super::*;
 
     use crate::service::LastDestinationListServiceBuilder;
@@ -1999,6 +1993,7 @@ mod clean_tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[rstest]
     #[case::error_at_first(&["a/b/c", "c/1.txt", "d"], &[])]
     #[case::error_util_first_dir(&["a/1.txt", "b/c/2.txt", "a/b/c", "3.txt", "a/e"], &["a/1.txt", "b/c/2.txt"])]

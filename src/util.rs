@@ -21,6 +21,30 @@ where
         })
 }
 
+pub fn symlink<P, Q>(from: P, to: Q) -> Result<()>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs;
+        fs::symlink(from, to)?;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs;
+        let from = from.as_ref();
+        if from.is_dir() {
+            fs::symlink_dir(from, to)?;
+        } else {
+            fs::symlink_file(from, to)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
