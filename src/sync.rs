@@ -43,11 +43,59 @@ macro_rules! sync_path {
     };
 }
 
+impl SyncerBuilder {
+    /// 设置绝对路径src。如果p为相对路径则使用[std::env::current_dir]配置
+    pub fn try_src(&mut self, p: impl AsRef<Path>) -> Result<&mut Self> {
+        let p = p.as_ref();
+        if p.is_absolute() {
+            self.src = Some(p.to_path_buf());
+        } else {
+            self.src = Some(std::env::current_dir().map(|d| d.join(p))?);
+        }
+        Ok(self)
+    }
+
+    /// 设置绝对路径dst。如果p为相对路径则使用[std::env::current_dir]配置
+    pub fn try_dst(&mut self, p: impl AsRef<Path>) -> Result<&mut Self> {
+        let p = p.as_ref();
+        if p.is_absolute() {
+            self.dst = Some(p.to_path_buf());
+        } else {
+            self.dst = Some(std::env::current_dir().map(|d| d.join(p))?);
+        }
+        Ok(self)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(src) = &self.src {
+            if !src.exists() {
+                return Err(format!("Not found src {}", src.display()));
+            }
+
+            if !src.is_absolute() {
+                return Err(format!("Found non absolute src path {}", src.display()));
+            }
+        }
+
+        if let Some(dst) = &self.dst {
+            if !dst.is_absolute() {
+                return Err(format!("Found non absolute dst path {}", dst.display()));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 将src目录内容同步到dst目录中
 #[derive(Debug, Clone, Builder)]
-#[builder(setter(into))]
+#[builder(setter(into), build_fn(validate = "Self::validate"))]
 pub struct Syncer {
+    /// 要求使用已存在的绝对路径
+    #[builder(setter(into))]
     src: PathBuf,
+
+    /// 要求使用已存在的绝对路径
+    #[builder(setter(into))]
     dst: PathBuf,
 
     #[builder(default = "true")]
@@ -222,8 +270,8 @@ impl Syncer {
             .collect::<Result<Vec<_>>>()
     }
 
-    /// 根据[LastDestinationListService]的配置与curr src在指定的target dsts中清理
-    /// dst目录中的文件，返回被移除的文件
+    /// 根据[LastDestinationListService]的配置last_dsts与当前src映射回的虚拟cur_dsts比较，
+    /// 如果在指定的target的last_dsts路径不再cur_dsts存在则清理dst目录中的文件并返回被移除的文件
     ///
     /// 从[LastDestinationListService]中加载上次的dsts并映射回last srcs与
     /// 当前curr srcs比较找出当前被删除的dsts路径（不在curr srcs中但存在于last srcs）并移除
@@ -234,13 +282,13 @@ impl Syncer {
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let target_dsts = target_dsts.into_iter().collect_vec();
+        let target_dsts = self.get_target_dsts(target_dsts);
         if log_enabled!(log::Level::Info) {
             info!(
                 "Cleaning dst {} in {} targets: [{}]",
                 self.dst.display(),
                 target_dsts.len(),
-                target_dsts.iter().map(|p| p.as_ref().display()).join(", ")
+                target_dsts.iter().map(|p| p.display()).join(", ")
             );
         }
 
@@ -254,7 +302,7 @@ impl Syncer {
 
         // 1. load cur srcs
         let curr_srcs = self.load_curr_srcs()?;
-        trace!("Loaded {} curr srcs: {:?}", curr_srcs.len(), curr_srcs);
+        trace!("Loaded {} curr srcs", curr_srcs.len());
 
         // 2. find removable srcs and dsts
         let removables = self.find_removable_src_dsts_iter(&curr_srcs, &last_dsts)?;
@@ -320,6 +368,28 @@ impl Syncer {
         );
 
         Ok(rm_dsts)
+    }
+
+    fn get_target_dsts<T, P>(&self, target_dsts: T) -> Vec<PathBuf>
+    where
+        T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut dsts = target_dsts
+            .into_iter()
+            .map(|p| {
+                let p = p.as_ref();
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.dst.join(p)
+                }
+            })
+            .collect_vec();
+        if dsts.is_empty() {
+            dsts.push(self.dst.to_path_buf());
+        }
+        dsts
     }
 
     /// 从src路径转换到对应的dst路径：
@@ -593,16 +663,20 @@ impl Syncer {
             .collect::<HashSet<_>>();
         if log_enabled!(log::Level::Trace) {
             trace!(
-                "Finding removable {} last srcs: [{}]. if not contains in {} curr srcs: {:?}",
+                "Finding removable {} last srcs not contains in {} current srcs: [{}]",
                 last_srcs.len(),
-                last_srcs.iter().map(|v| v.0.display()).join(","),
                 curr_srcs.len(),
-                curr_srcs
+                last_srcs.iter().map(|v| v.0.display()).join(","),
             );
         }
-        Ok(last_srcs
+        let it = last_srcs
             .into_iter()
-            .filter(move |(src, _)| !curr_srcs.contains(src.as_path())))
+            .filter(move |(src, _)| !curr_srcs.contains(src.as_path()));
+        if log_enabled!(log::Level::Trace) {
+            let v = it.clone().collect_vec();
+            trace!("Found {} Removable src dsts paths: {:?}", v.len(), v);
+        }
+        Ok(it)
     }
 }
 

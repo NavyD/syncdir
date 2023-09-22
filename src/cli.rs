@@ -2,7 +2,8 @@ use std::{fs, path::PathBuf};
 
 use crate::{
     service::{LastDestinationListService, LastDestinationListServiceBuilder},
-    sync::{SyncPath, Syncer, SyncerBuilder}, CRATE_NAME,
+    sync::{SyncPath, Syncer, SyncerBuilder},
+    CRATE_NAME,
 };
 use anyhow::{bail, Result};
 use clap::{value_parser, Parser, Subcommand};
@@ -164,8 +165,8 @@ impl Opts {
         }
         let last_dsts_srv = self.build_last_dsts_srv()?;
         SyncerBuilder::default()
-            .src(sub_opts.src.canonicalize()?)
-            .dst(sub_opts.dst.canonicalize()?)
+            .try_src(&sub_opts.src)?
+            .try_dst(&sub_opts.dst)?
             .dry_run(sub_opts.dry_run)
             .last_dsts_srv(last_dsts_srv)
             .build()

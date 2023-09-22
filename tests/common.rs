@@ -22,6 +22,7 @@ pub struct TestEnv {
     dst: Option<TempDir>,
     src: TempDir,
     copier: Copier,
+    workdir: Option<PathBuf>,
 }
 
 impl TestEnv {
@@ -36,7 +37,15 @@ impl TestEnv {
             last_dsts_holder: None,
             dst: None,
             copier: CopierBuilder::default().build().unwrap(),
+            workdir: None,
         }
+    }
+
+    pub fn with_workdir<P: AsRef<Path>>(mut self, p: P) -> Self {
+        let p = p.as_ref().to_path_buf();
+        std::env::set_current_dir(&p).unwrap();
+        self.workdir = Some(p);
+        self
     }
 
     /// 将修改rel_mod_srcs中对应的src路径文件的内容等
@@ -104,11 +113,19 @@ impl TestEnv {
     }
 
     pub fn src_root(&self) -> &Path {
-        self.src.path()
+        let p = self.src.path();
+        self.workdir
+            .as_deref()
+            .and_then(|d| p.strip_prefix(d).ok())
+            .unwrap_or(p)
     }
 
     pub fn dst_root(&self) -> &Path {
-        self.dst.as_ref().unwrap().path()
+        let p = self.dst.as_ref().unwrap().path();
+        self.workdir
+            .as_deref()
+            .and_then(|d| p.strip_prefix(d).ok())
+            .unwrap_or(p)
     }
 
     pub fn copier(&self) -> &Copier {

@@ -12,7 +12,7 @@ use walkdir::WalkDir;
 
 mod common;
 
-use std::{fs, path::Path, sync::Once};
+use std::{collections::HashSet, fs, path::Path, sync::Once};
 
 use log::LevelFilter;
 
@@ -265,4 +265,74 @@ fn test_apply_to_dst(
 
     let _paths = sync.apply_to_dst(target_dsts).unwrap();
     te.assert_synced(target_dsts);
+}
+
+#[rstest]
+#[case(&DEFAULT_PATHS, &[], &[], &[])]
+#[case(&DEFAULT_PATHS, &DEFAULT_PATHS, &[&DEFAULT_PATHS.map(|v| v[0])[..], &SIMPLE.map(|v| v[0])].concat(), &["home", "boot", "etc/openresty"])]
+fn test_clean_dst(
+    #[case] srcs: &[&[&str]],
+    #[case] dsts: &[&[&str]],
+    #[case] last_dsts: &[&str],
+    #[case] target_dsts: &[&str],
+) {
+    let te = TestEnv::new(srcs.iter().copied())
+        .with_dsts(dsts.iter().copied())
+        .with_last_dsts(last_dsts)
+        .with_copier(CopierBuilder::default().build().unwrap());
+    let dst = te.dst_root();
+
+    let sync = SyncerBuilder::default()
+        .copier(te.copier().clone())
+        .last_dsts_srv(te.last_dsts_srv().unwrap().clone())
+        .dst(dst)
+        .src(te.src_root())
+        .non_interactive(true)
+        .build()
+        .unwrap();
+
+    let paths = sync.clean_dst(target_dsts).unwrap();
+
+    let target_dsts = {
+        let mut v = target_dsts.iter().copied().collect_vec();
+        if v.is_empty() {
+            v.push("");
+        }
+        v
+    };
+
+    let src_paths = srcs
+        .iter()
+        .flat_map(|v| v.iter())
+        // .map(|s| src.join(s))
+        .collect::<HashSet<_>>();
+    let expect_cleaneds = dsts
+        .iter()
+        .flat_map(|v| v.iter())
+        // 不包含在当前的src中
+        .filter(|p| !src_paths.contains(p))
+        // 不包含在非targets中
+        .filter(|p| target_dsts.iter().any(|t| p.starts_with(t)))
+        // 绝对路径
+        .map(|s| dst.join(s))
+        .collect_vec();
+    let paths = paths.into_iter().sorted().collect_vec();
+    assert_eq!(paths, expect_cleaneds);
+    for p in &expect_cleaneds {
+        assert!(!p.exists());
+    }
+    // 非expect_cleaneds应该都存在
+    for p in dsts
+        .iter()
+        .flat_map(|v| v.iter())
+        .map(|s| dst.join(s))
+        .filter(|p| !expect_cleaneds.contains(p))
+    {
+        assert!(
+            // 忽略不存在的软链接:N
+            p.exists() || p.is_symlink() || p.extension().unwrap() == "N",
+            "expect exists path: {}",
+            p.display()
+        );
+    }
 }
