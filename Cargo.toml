@@ -18,13 +18,15 @@ getset = "0.1.2"
 itertools = "0.11"
 sha2 = "0.10.7"
 walkdir = "2"
+os_display = "0.1.3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["user", "fs"] }
+xattr = "1.0"
 
 
 [profile.release]
-strip = true      # Automatically strip symbols from the binary.
+strip = true # Automatically strip symbols from the binary.
 # opt-level = "z"   # Optimize for size.
 lto = true
 codegen-units = 1

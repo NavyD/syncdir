@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 
@@ -40,6 +43,26 @@ where
             fs::symlink_dir(from, to)?;
         } else {
             fs::symlink_file(from, to)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn remove(p: impl AsRef<Path>) -> io::Result<()> {
+    let p = p.as_ref();
+    if p.is_symlink() || p.is_file() {
+        fs::remove_file(p)
+    } else {
+        fs::remove_dir_all(p)
+    }
+}
+
+/// 直接移除路径p如果不存在则不会返回err
+pub fn try_remove(p: impl AsRef<Path>) -> io::Result<()> {
+    if let Err(e) = remove(p) {
+        match e.kind() {
+            io::ErrorKind::NotFound => {}
+            _ => return io::Result::Err(e),
         }
     }
     Ok(())
