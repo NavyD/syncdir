@@ -6,48 +6,38 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use derive_builder::Builder;
 use filetime::FileTime;
+use getset::Getters;
 use log::{debug, log_enabled, trace, warn};
 use os_display::Quotable;
-use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::{sync::SyncPath, util};
+use crate::util;
 
-macro_rules! sync_path {
-    ($src:expr) => {
-        SyncPath::Removed($src)
-    };
-    ($src:expr, $dst:expr) => {
-        if $dst.exists() || $dst.is_symlink() {
-            SyncPath::Overriden($src, $dst)
-        } else {
-            SyncPath::Coppied($src, $dst)
-        }
-    };
+#[derive(Clone, Debug, Default)]
+pub struct OptionAttrs {
+    pub mode: Option<u32>,
+    #[cfg(target_family = "unix")]
+    pub uid: Option<u32>,
+    #[cfg(target_family = "unix")]
+    pub gid: Option<u32>,
 }
 
-struct OptionAttr {
-    mode: Option<u32>,
-    #[cfg(target_family = "unix")]
-    uid: Option<u32>,
-    #[cfg(target_family = "unix")]
-    gid: Option<u32>,
-}
-
-struct Attribute {
-    mode: bool,
+#[derive(Clone, Debug)]
+pub struct Attributes {
+    pub mode: bool,
     #[cfg(unix)]
-    ownership: bool,
+    pub ownership: bool,
     /// 是否保留目录文件amtimes
-    timestamps: bool,
+    pub timestamps: bool,
     /// 是否跟随软链接。默认为false
-    xattr: bool,
+    pub xattr: bool,
     // /// 是否保持硬链接
     // links: bool,
 }
 
-impl Default for Attribute {
+impl Default for Attributes {
     fn default() -> Self {
         Self {
             mode: true,
@@ -60,12 +50,67 @@ impl Default for Attribute {
     }
 }
 
-struct Copier {
-    path_attrs: Option<HashMap<PathBuf, OptionAttr>>,
-    default_attr: Attribute,
+#[derive(Clone, Debug, Default, Builder, Getters)]
+#[builder(setter(into, strip_option), default)]
+#[getset(get = "pub")]
+pub struct Copier {
+    path_attrs: Option<HashMap<PathBuf, OptionAttrs>>,
+    attrs: Attributes,
 }
 
 impl Copier {
+    /// 递归的复制目录树。如果src是一个文件且dst是已存在的目录，将会复制文件到dst/中
+    pub fn copy<P, Q>(&self, src: P, dst: Q) -> Result<()>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        let (src, dst) = (src.as_ref(), dst.as_ref());
+        if !src.exists() {
+            bail!("Not found exists path: {}", src.quote());
+        }
+
+        if src.is_dir() {
+            return self.copy_dir(src, dst);
+        }
+        // from is file
+        let to = if dst.is_dir() {
+            dst.join(
+                src.file_name()
+                    .ok_or_else(|| anyhow!("Not found file name for path {}", src.quote()))?,
+            )
+        } else {
+            dst.to_path_buf()
+        };
+        self.copy_file(src, to)?;
+        Ok(())
+    }
+
+    #[deprecated]
+    pub fn copy_metadata<P, Q>(&self, from: P, to: Q) -> Result<()>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        todo!()
+    }
+
+    /// 复制文件或仅复制当前目录及属性，但不包括目录中的文件
+    pub fn copy_file_or_dir_only<P, Q>(&self, src: P, dst: Q) -> Result<()>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        let (src, dst) = (src.as_ref(), dst.as_ref());
+        if src.is_symlink() || src.is_file() {
+            self.copy_file(src, dst)?;
+        } else {
+            fs::create_dir_all(dst)?;
+            self.copy_attrs(src, dst)?;
+        }
+        Ok(())
+    }
+
     fn copy_attrs<P, Q>(&self, src: P, dst: Q) -> Result<()>
     where
         P: AsRef<Path>,
@@ -83,7 +128,7 @@ impl Copier {
                 .as_ref()
                 .and_then(|v| v.get(src).map(|a| (a.uid, a.gid)))
                 .unwrap_or_default();
-            if uid.is_some() || gid.is_some() || self.default_attr.ownership {
+            if uid.is_some() || gid.is_some() || self.attrs.ownership {
                 let (uid, gid) = (
                     uid.unwrap_or_else(|| src_meta.uid()),
                     gid.unwrap_or_else(|| src_meta.gid()),
@@ -120,7 +165,7 @@ impl Copier {
         // do nothing, since every symbolic link has the same
         // permissions.
         if !dst_meta.is_symlink() {
-            if new_mode.is_some() || self.default_attr.mode {
+            if new_mode.is_some() || self.attrs.mode {
                 let new_mode = new_mode.unwrap_or_else(|| src_meta.mode());
                 let mut perm = src_meta.permissions();
                 trace!(
@@ -141,7 +186,7 @@ impl Copier {
             );
         }
 
-        if self.default_attr.timestamps {
+        if self.attrs.timestamps {
             let atime = FileTime::from_last_access_time(&src_meta);
             let mtime = FileTime::from_last_modification_time(&src_meta);
             trace!(
@@ -157,33 +202,6 @@ impl Copier {
             }
         }
 
-        Ok(())
-    }
-
-    /// copy all recursively
-    pub fn copy<P, Q>(&self, src: P, dst: Q) -> Result<()>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        let (src, dst) = (src.as_ref(), dst.as_ref());
-        if !src.exists() {
-            bail!("Not found exists path: {}", src.display());
-        }
-
-        if src.is_dir() {
-            return self.copy_dir(src, dst);
-        }
-        // from is file
-        let to = if dst.is_dir() {
-            dst.join(
-                src.file_name()
-                    .ok_or_else(|| anyhow!("Not found file name for path {}", src.display()))?,
-            )
-        } else {
-            dst.to_path_buf()
-        };
-        self.copy_file(src, &to)?;
         Ok(())
     }
 
@@ -275,14 +293,6 @@ impl Copier {
         self.copy_attrs(src, dst)
             .with_context(|| format!("Copy attrs {} -> {}", src.quote(), dst.quote()))?;
         Ok(())
-    }
-
-    fn diff<P, Q>(&self, from: P, to: Q) -> Result<()>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        todo!()
     }
 
     //     /// 比较两个文件是否一致

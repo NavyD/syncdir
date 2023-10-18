@@ -4,6 +4,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use log::{debug, info};
+use os_display::Quotable;
 
 pub fn map_path<P, Q, R>(src: P, src_base: Q, dst_base: R) -> Result<PathBuf>
 where
@@ -48,11 +50,26 @@ where
     Ok(())
 }
 
+pub fn get_path_ty(p: impl AsRef<Path>) -> &'static str {
+    let p = p.as_ref();
+    if p.is_symlink() {
+        "link"
+    } else if p.is_dir() {
+        "dir "
+    } else if p.is_file() {
+        "file"
+    } else {
+        "none"
+    }
+}
+
 pub fn remove(p: impl AsRef<Path>) -> io::Result<()> {
     let p = p.as_ref();
     if p.is_symlink() || p.is_file() {
+        debug!("Removing {} {}", get_path_ty(p), p.quote());
         fs::remove_file(p)
     } else {
+        debug!("Removing all dir {}", p.quote());
         fs::remove_dir_all(p)
     }
 }
