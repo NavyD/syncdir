@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fs,
-    os::unix::prelude::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -144,37 +143,38 @@ impl Copier {
                     xattr::set(dst, xname, &xval)?;
                 }
             }
-        }
 
-        let new_mode = self
-            .path_attrs
-            .as_ref()
-            .and_then(|v| v.get(dst).and_then(|a| a.mode));
-        // The `chmod()` system call that underlies the
-        // `fs::set_permissions()` call is unable to change the
-        // permissions of a symbolic link. In that case, we just
-        // do nothing, since every symbolic link has the same
-        // permissions.
-        if !dst_meta.is_symlink() {
-            if new_mode.is_some() || self.attrs.mode {
-                let new_mode = new_mode.unwrap_or_else(|| src_meta.mode());
-                let mut perm = src_meta.permissions();
-                trace!(
-                    "Changing mode from {:#o} to {:#o} for dst path {}",
+            use std::os::unix::prelude::{MetadataExt, PermissionsExt};
+            let new_mode = self
+                .path_attrs
+                .as_ref()
+                .and_then(|v| v.get(dst).and_then(|a| a.mode));
+            // The `chmod()` system call that underlies the
+            // `fs::set_permissions()` call is unable to change the
+            // permissions of a symbolic link. In that case, we just
+            // do nothing, since every symbolic link has the same
+            // permissions.
+            if !dst_meta.is_symlink() {
+                if new_mode.is_some() || self.attrs.mode {
+                    let new_mode = new_mode.unwrap_or_else(|| src_meta.mode());
+                    let mut perm = src_meta.permissions();
+                    trace!(
+                        "Changing mode from {:#o} to {:#o} for dst path {}",
+                        dst_meta.mode(),
+                        new_mode,
+                        dst.quote(),
+                    );
+                    perm.set_mode(new_mode);
+                    fs::set_permissions(dst, perm)?;
+                }
+            } else if let Some(new_mode) = new_mode {
+                warn!(
+                    "Ignoring settings mode from {:#o} to {:#o} for symlink dst path {}",
                     dst_meta.mode(),
                     new_mode,
-                    dst.quote(),
+                    dst.quote()
                 );
-                perm.set_mode(new_mode);
-                fs::set_permissions(dst, perm)?;
             }
-        } else if let Some(new_mode) = new_mode {
-            warn!(
-                "Ignoring settings mode from {:#o} to {:#o} for symlink dst path {}",
-                dst_meta.mode(),
-                new_mode,
-                dst.quote()
-            );
         }
 
         if self.attrs.timestamps {

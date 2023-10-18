@@ -660,9 +660,9 @@ impl<T: AsRef<Path>> TreePath<T> {
             {
                 use std::os::windows::fs;
                 if from.is_dir() {
-                    fs::symlink_dir(from, to)?;
+                    fs::symlink_dir(from, &to)?;
                 } else {
-                    fs::symlink_file(from, to)?;
+                    fs::symlink_file(from, &to)?;
                 }
             }
             from = to;
