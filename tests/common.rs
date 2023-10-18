@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, bail, Context, Error, Result};
+use anyhow::{bail, Context, Error, Result};
 use filetime::FileTime;
 use itertools::Itertools;
 use os_display::Quotable;
@@ -33,34 +33,7 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    #[deprecated]
-    pub fn new<T, I, P>(rel_srcs: T) -> Self
-    where
-        T: IntoIterator<Item = I>,
-        I: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        let last_dsts_holder = tempfile::Builder::new()
-            .prefix("syncdir-last-dsts-")
-            .tempfile()
-            .unwrap();
-        Self {
-            src: create_tree(rel_srcs, Some("syncdir-src-")).expect("create dir tree"),
-            last_dsts_srv: LastDestinationListServiceBuilder::default()
-                .path(last_dsts_holder.path().to_path_buf())
-                .build()
-                .unwrap(),
-            _last_dsts_holder: last_dsts_holder,
-            dst: None,
-            copier: CopierBuilder::default().build().unwrap(),
-            workdir: None,
-            src_paths: vec![],
-            dst_paths: vec![],
-            last_dsts: vec![],
-        }
-    }
-
-    pub fn with_tree_paths<T, I, P>(rel_paths: T) -> Self
+    pub fn new<T, I, P>(rel_paths: T) -> Self
     where
         T: IntoIterator<Item = I>,
         I: TryInto<TreePath<P>, Error = Error>,
@@ -87,6 +60,7 @@ impl TestEnv {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_workdir<P: AsRef<Path>>(mut self, p: P) -> Self {
         let p = p.as_ref().to_path_buf();
         std::env::set_current_dir(&p).unwrap();
@@ -95,6 +69,7 @@ impl TestEnv {
     }
 
     /// 将修改rel_mod_srcs中对应的src路径文件的内容等
+    #[allow(dead_code)]
     pub fn with_mod_srcs<F>(self, mod_fn: F) -> Self
     where
         F: Fn(&Path) -> Result<()>,
@@ -106,19 +81,7 @@ impl TestEnv {
         self
     }
 
-    #[deprecated]
     pub fn with_dsts<T, I, P>(mut self, rel_dsts: T) -> Self
-    where
-        T: IntoIterator<Item = I>,
-        I: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        let dst = create_tree(rel_dsts, Some("syncdir-dst-")).unwrap();
-        self.dst = Some(dst);
-        self
-    }
-
-    pub fn with_dsts_paths<T, I, P>(mut self, rel_dsts: T) -> Self
     where
         T: IntoIterator<Item = I>,
         I: TryInto<TreePath<P>, Error = Error>,
@@ -198,6 +161,23 @@ impl TestEnv {
         &self.last_dsts_srv
     }
 
+    pub fn get_rel_target_dsts<T, P>(&self, rel_target_dsts: T) -> Vec<PathBuf>
+    where
+        T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut v = rel_target_dsts
+            .into_iter()
+            .map(|p| p.as_ref().to_path_buf())
+            .collect_vec();
+        if v.is_empty() {
+            v.push(PathBuf::from(""));
+        }
+        v
+    }
+
+    /// 测试 [syncdir::sync::Syncer::sync_back]
+    ///
     /// 思路：
     ///
     /// * 如果last dsts存在
@@ -214,16 +194,7 @@ impl TestEnv {
     {
         let (src, dst) = (self.src_root(), self.dst_root());
 
-        let rel_target_dsts = {
-            let mut v = rel_target_dsts
-                .into_iter()
-                .map(|p| p.as_ref().to_path_buf())
-                .collect_vec();
-            if v.is_empty() {
-                v.push(PathBuf::from(""));
-            }
-            v
-        };
+        let rel_target_dsts = self.get_rel_target_dsts(rel_target_dsts);
         let target_dsts = rel_target_dsts.iter().map(|p| dst.join(p)).collect_vec();
 
         let last_dsts_in_t = self
@@ -300,24 +271,69 @@ impl TestEnv {
         }
     }
 
-    #[deprecated]
-    pub fn assert_synced<T, P>(&self, rel_target_dsts: T)
+    /// 测试 apply to dst
+    ///
+    /// 思路：
+    ///
+    /// 对于指定每个target dst与对应的src目录应该是完全一样的
+    pub fn assert_applied<T, P>(&self, rel_target_dsts: T)
     where
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
         let (src, dst) = (self.src_root(), self.dst_root());
-        let target_dsts = rel_target_dsts.into_iter().collect_vec();
-        if target_dsts.is_empty() {
+        let rel_target_dsts = rel_target_dsts.into_iter().collect_vec();
+        if rel_target_dsts.is_empty() {
             self.assert_same_dir(src, dst);
         } else {
-            for relp in target_dsts {
-                let (src, dst) = (src.join(&relp), dst.join(&relp));
-                if dst.exists() {
-                    self.assert_same_dir(src, dst);
-                }
+            for p in rel_target_dsts {
+                let (src, dst) = (src.join(&p), dst.join(&p));
+                self.assert_same_dir(src, dst);
             }
         }
+    }
+
+    pub fn assert_clean_dst<T, U, P, Q>(&self, rel_target_dsts: T, cleaned_dsts: U)
+    where
+        T: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+        U: IntoIterator<Item = Q>,
+        Q: AsRef<Path>,
+    {
+        let rel_target_dsts = self.get_rel_target_dsts(rel_target_dsts);
+        let srcs = self
+            .src_paths
+            .iter()
+            .flat_map(|tp| tp.created_ancestors())
+            .collect::<HashSet<_>>();
+        let dsts = self
+            .dst_paths
+            .iter()
+            .flat_map(|tp| tp.created_ancestors())
+            .collect::<HashSet<_>>();
+        let expect_cleaneds = dsts
+            .iter()
+            // 不包含在当前的src中
+            .filter(|p| !srcs.contains(*p))
+            // 不包含在非targets中
+            .filter(|p| rel_target_dsts.iter().any(|t| p.starts_with(t)))
+            // 绝对路径
+            .map(|s| self.dst_root().join(s))
+            .sorted()
+            .collect_vec();
+        let cleaned_dsts: Vec<PathBuf> = cleaned_dsts
+            .into_iter()
+            .map(|p| p.as_ref().to_path_buf())
+            .sorted()
+            .collect_vec();
+        for p in &cleaned_dsts {
+            assert!(!p.exists() && !p.is_symlink());
+        }
+        assert_eq!(expect_cleaneds, cleaned_dsts);
+        dsts.iter()
+            .map(|p| self.dst_root().join(p))
+            .filter(|p| !expect_cleaneds.contains(p))
+            .for_each(|p| assert!(p.exists() || p.is_symlink()));
     }
 
     pub fn assert_same_dir<P, Q>(&self, src: P, dst: Q)
@@ -510,6 +526,10 @@ impl TestEnv {
 }
 
 /// 表示一个相对路径的文件或目录及存在多个关联的相对路径软链接
+/// * 使用嵌入的paths表示对路径`paths[0]`进行多级链接
+/// * `paths[0]`通过是否存在后缀`/`，区分创建的是dir还是file
+/// * 如果`paths[0].ext == N`则表示不会创建这个路径，用于表示错误的symlink
+/// * 所有的paths必须是相对路径
 #[derive(Clone)]
 pub struct TreePath<T: AsRef<Path>>(Vec<T>);
 
@@ -686,6 +706,7 @@ impl<T: AsRef<Path>> TryFrom<Vec<T>> for TreePath<T> {
     }
 }
 
+/// 通过 [TreePath] 创建一个目录树
 pub fn create_tree_paths<T, I, P>(
     rel_paths: T,
     prefix: Option<&str>,
@@ -746,92 +767,6 @@ where
         expect_paths.len()
     );
     Ok((root, tree_paths))
-}
-
-/// 创建一个目录树
-///
-/// * 使用嵌入的paths表示对路径`paths[0]`进行多级链接
-/// * `paths[0]`通过是否存在后缀，区分创建的是dir还是file
-/// * 如果`paths[0].ext == N`则表示不会创建这个路径，用于表示错误的symlink
-/// * 所有的paths必须是相对路径
-#[deprecated]
-pub fn create_tree<T, I, P>(rel_paths: T, prefix: Option<&str>) -> Result<TempDir>
-where
-    T: IntoIterator<Item = I>,
-    I: IntoIterator<Item = P>,
-    P: AsRef<Path>,
-{
-    let root = {
-        let mut b = tempfile::Builder::new();
-        if let Some(prefix) = prefix {
-            b.prefix(prefix);
-        }
-        b.tempdir()?
-    };
-
-    let create_dir_or_file = |p: &Path| {
-        if let Some(pp) = p.parent() {
-            fs::create_dir_all(pp)?;
-        }
-        if let Some(ext) = p.extension() {
-            if ext.to_str() == Some("N") {
-                return Ok(());
-            }
-            fs::write(p, p.display().to_string())?;
-        } else {
-            fs::create_dir(p)?;
-        }
-        Ok::<_, Error>(())
-    };
-
-    for paths in rel_paths {
-        let paths: Vec<PathBuf> = paths
-            .into_iter()
-            .map(|p| {
-                let p: &Path = p.as_ref();
-                if p.is_absolute() {
-                    Err(anyhow!(
-                        "Found absolute path {} for create tree",
-                        p.display()
-                    ))
-                } else {
-                    Ok(root.path().join(p))
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if paths.is_empty() {
-            bail!("Found empty nest paths")
-        }
-
-        let p = &paths[0];
-        create_dir_or_file(p)?;
-
-        let mut from = p;
-        // create multi link for p
-        for to in &paths[1..] {
-            if to.is_symlink() || to.is_file() {
-                fs::remove_file(to)?;
-            } else if to.is_dir() {
-                fs::remove_dir(to)?;
-            } else if let Some(pp) = to.parent() {
-                fs::create_dir_all(pp)?;
-            }
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(from, to)?;
-
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs;
-                if from.is_dir() {
-                    fs::symlink_dir(from, to)?;
-                } else {
-                    fs::symlink_file(from, to)?;
-                }
-            }
-            from = to;
-        }
-    }
-    Ok(root)
 }
 
 fn metadata(p: impl AsRef<Path>) -> io::Result<fs::Metadata> {

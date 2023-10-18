@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
     os::unix::prelude::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use derive_builder::Builder;
 use filetime::FileTime;
 use getset::Getters;
-use log::{debug, log_enabled, trace, warn};
+use log::{log_enabled, trace, warn};
 use os_display::Quotable;
 use walkdir::WalkDir;
 
@@ -84,15 +84,6 @@ impl Copier {
         };
         self.copy_file(src, to)?;
         Ok(())
-    }
-
-    #[deprecated]
-    pub fn copy_metadata<P, Q>(&self, from: P, to: Q) -> Result<()>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        todo!()
     }
 
     /// 复制文件或仅复制当前目录及属性，但不包括目录中的文件
@@ -294,161 +285,4 @@ impl Copier {
             .with_context(|| format!("Copy attrs {} -> {}", src.quote(), dst.quote()))?;
         Ok(())
     }
-
-    //     /// 比较两个文件是否一致
-    //     ///
-    //     /// ## symlink
-    //     ///
-    //     /// 如果文件都为symlink，则比较链接路径是否一致，如果存在一个为symlink则直接返回true。
-    //     /// 如果配置了[Self::follow_symlinks]=true则将读取symlink指向路径的文件比较
-    //     ///
-    //     /// 对于symlink本身的权限信息比较将被忽略，
-    //     /// 参考[How do file permissions apply to symlinks?](https://superuser.com/a/303063)
-    //     ///
-    //     /// 注意：[std::fs::metadata]将跟随symlink，而[std::fs::symlink_metadata]会获取symlink本身
-    //     pub fn has_changed<P, Q>(&self, new: P, old: Q) -> Result<bool>
-    //     where
-    //         P: AsRef<Path>,
-    //         Q: AsRef<Path>,
-    //     {
-    //         let (new, old) = (new.as_ref(), old.as_ref());
-
-    //         let (new, old) = if !self.get_attr(old).follow_symlinks {
-    //             match (new.is_symlink(), old.is_symlink()) {
-    //                 (true, true) => {
-    //                     trace!("Reading symlink path for changed");
-    //                     return Ok(fs::read_link(new)? == fs::read_link(old)?);
-    //                 }
-    //                 (false, false) => (new.to_path_buf(), old.to_path_buf()),
-    //                 _ => {
-    //                     trace!("Found changes with one symlink");
-    //                     return Ok(true);
-    //                 }
-    //             }
-    //         } else {
-    //             (
-    //                 if new.is_symlink() {
-    //                     fs::read_link(new)?
-    //                 } else {
-    //                     new.to_path_buf()
-    //                 },
-    //                 if old.is_symlink() {
-    //                     fs::read_link(old)?
-    //                 } else {
-    //                     old.to_path_buf()
-    //                 },
-    //             )
-    //         };
-
-    //         #[cfg(target_family = "unix")]
-    //         {
-    //             let (new_meta, old_meta) = (new.metadata()?, old.metadata()?);
-    //             let attr = self.get_attr(&old);
-    //             if (attr.mode.is_some()
-    //                 && new_meta.permissions().mode() != old_meta.permissions().mode())
-    //                 || (attr.uid.is_some() && new_meta.uid() != old_meta.uid())
-    //                 || (attr.gid.is_some() && new_meta.gid() != old_meta.gid())
-    //             {
-    //                 trace!(
-    //                     "Found file metadata changed {:?} != {:?}",
-    //                     new_meta,
-    //                     old_meta
-    //                 );
-    //                 return Ok(true);
-    //             }
-    //         }
-
-    //         debug!("Computing the hash of file {}", new.display());
-    //         let mut hasher = Sha256::new();
-    //         io::copy(&mut fs::File::open(&new)?, &mut hasher)?;
-    //         let hash_new = hasher.finalize();
-
-    //         debug!("Computing the hash of file {}", old.display());
-    //         let mut hasher = Sha256::new();
-    //         io::copy(&mut fs::File::open(&old)?, &mut hasher)?;
-    //         let hash_old = hasher.finalize();
-
-    //         if log_enabled!(log::Level::Trace) {
-    //             trace!(
-    //                 "Comparing hash for file {}: {} and file {}: {}",
-    //                 new.display(),
-    //                 std::str::from_utf8(&hash_new)?,
-    //                 old.display(),
-    //                 std::str::from_utf8(&hash_old)?,
-    //             );
-    //         }
-    //         Ok(hash_new == hash_old)
-    //     }
-
-    //     fn copy_metadata<P, Q>(&self, from: P, to: Q) -> Result<()>
-    //     where
-    //         P: AsRef<Path>,
-    //         Q: AsRef<Path>,
-    //     {
-    //         // #[cfg(target_family = "unix")]
-    //         // {
-    //         //     let (from, to) = (from.as_ref(), to.as_ref());
-    //         //     let meta = self.metadata(from)?;
-    //         //     // setup rights
-    //         //     if let Some(mode) = self.mode {
-    //         //         let mut perm = meta.permissions();
-    //         //         debug!(
-    //         //             "Setting up permission mode from {} to {} for path {}",
-    //         //             perm.mode(),
-    //         //             mode,
-    //         //             to.display()
-    //         //         );
-    //         //         perm.set_mode(mode);
-    //         //         fs::set_permissions(to, perm)?;
-    //         //     }
-    //         //     if self.uid.is_some() || self.gid.is_some() {
-    //         //         debug!(
-    //         //             "Setting up owner to {}:{} for path {}",
-    //         //             self.uid.unwrap_or_else(|| meta.uid()),
-    //         //             self.gid.unwrap_or_else(|| meta.gid()),
-    //         //             to.display()
-    //         //         );
-    //         //         chown(to, self.uid.map(Into::into), self.gid.map(Into::into))?;
-    //         //     }
-    //         // }
-    //         Ok(())
-    //     }
-
-    //     fn metadata<P: AsRef<Path>>(&self, p: P) -> io::Result<fs::Metadata> {
-    //         // let p = p.as_ref();
-    //         // if p.is_symlink() && !self.follow_symlinks {
-    //         //     p.symlink_metadata()
-    //         // } else {
-    //         //     p.metadata()
-    //         // }
-    //         todo!()
-    //     }
-
-    //     fn copy_filetimes<P, Q>(&self, from: P, to: Q) -> Result<()>
-    //     where
-    //         P: AsRef<Path>,
-    //         Q: AsRef<Path>,
-    //     {
-    //         let (from, to) = (from.as_ref(), to.as_ref());
-    //         if let Ok(meta) = from.symlink_metadata() {
-    //             if let Err(e) = filetime::set_symlink_file_times(
-    //                 to,
-    //                 FileTime::from_last_access_time(&meta),
-    //                 FileTime::from_last_modification_time(&meta),
-    //             ) {
-    //                 warn!("Failed to set file {} atime/mtime: {}", to.display(), e);
-    //             }
-    //         } else {
-    //             let meta = from.metadata()?;
-
-    //             if let Err(e) = filetime::set_file_times(
-    //                 to,
-    //                 FileTime::from_last_access_time(&meta),
-    //                 FileTime::from_last_modification_time(&meta),
-    //             ) {
-    //                 warn!("Failed to set file {} atime/mtime: {}", to.display(), e);
-    //             }
-    //         }
-    //         Ok(())
-    //     }
 }

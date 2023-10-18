@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use log::{debug, info};
+use log::debug;
 use os_display::Quotable;
 
 pub fn map_path<P, Q, R>(src: P, src_base: Q, dst_base: R) -> Result<PathBuf>
