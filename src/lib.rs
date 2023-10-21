@@ -3,6 +3,7 @@ pub mod util;
 pub mod sync;
 pub mod cli;
 pub mod cp;
+pub mod config;
 
 pub static CRATE_NAME: &str = env!("CARGO_CRATE_NAME");
 

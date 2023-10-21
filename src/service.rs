@@ -7,13 +7,30 @@ use std::{
 
 use anyhow::Result;
 use derive_builder::Builder;
+use faccess::PathExt;
 use itertools::Itertools;
 use log::{debug, info, trace, warn};
+use os_display::Quotable;
 
 /// last dsts持久化服务
 #[derive(Debug, Clone, Builder)]
+#[builder(setter(into), build_fn(validate = "Self::validate"))]
 pub struct LastDestinationListService {
     path: PathBuf,
+}
+
+impl LastDestinationListServiceBuilder {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(p) = &self.path.as_deref().filter(|p| p.exists()) {
+            if !p.readable() {
+                return Err(format!("Unreadable last dsts file {}", p.quote()));
+            }
+            if !p.writable() {
+                return Err(format!("Unwritable last dsts file {}", p.quote()));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl LastDestinationListService {

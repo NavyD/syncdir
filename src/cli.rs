@@ -1,6 +1,11 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{self, File},
+    path::PathBuf,
+};
 
 use crate::{
+    config::Config,
+    cp::CopierBuilder,
     service::{LastDestinationListService, LastDestinationListServiceBuilder},
     sync::{SyncPath, Syncer, SyncerBuilder},
     CRATE_NAME,
@@ -8,7 +13,8 @@ use crate::{
 use anyhow::{bail, Result};
 use clap::{value_parser, Parser, Subcommand};
 use directories::ProjectDirs;
-use log::{debug, LevelFilter};
+use log::{debug, trace, LevelFilter};
+use os_display::Quotable;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -153,6 +159,11 @@ impl Opts {
     }
 
     fn build_last_dsts_srv(&self) -> Result<LastDestinationListService> {
+        let p = self.config_dir.join("last-dsts");
+        if p.parent().map(|pp| pp.exists()).unwrap_or_default() && !p.exists() {
+            // 创建空文件占用 防止当使用root用户指定配置文件夹时使用
+            File::create(p)?;
+        }
         LastDestinationListServiceBuilder::default()
             .path(self.config_dir.join("last-dsts"))
             .build()
@@ -164,12 +175,26 @@ impl Opts {
             debug!("Creating config dir in {}", self.config_dir.display());
             fs::create_dir_all(&self.config_dir)?;
         }
-        let last_dsts_srv = self.build_last_dsts_srv()?;
+
+        let conf_path = self.config_dir.join("config.toml");
+        let cp = if conf_path.exists() {
+            debug!("Loading config from {}", conf_path.quote());
+            let config = toml::from_str::<Config>(&fs::read_to_string(conf_path)?)?;
+            trace!("Loaded config: {:?}", config);
+            CopierBuilder::default()
+                .try_attrs(config.path_attrs)?
+                .build()?
+        } else {
+            debug!("Skipped load config for non exists {}", conf_path.quote());
+            CopierBuilder::default().build()?
+        };
+
         SyncerBuilder::default()
             .try_src(&sub_opts.src)?
             .try_dst(&sub_opts.dst)?
             .dry_run(sub_opts.dry_run)
-            .last_dsts_srv(last_dsts_srv)
+            .copier(cp)
+            .last_dsts_srv(self.build_last_dsts_srv()?)
             .build()
             .map_err(Into::into)
     }

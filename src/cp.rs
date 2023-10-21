@@ -1,13 +1,10 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use derive_builder::Builder;
 use filetime::FileTime;
 use getset::Getters;
+use globset::{GlobBuilder, GlobMatcher};
 use log::{log_enabled, trace, warn};
 use os_display::Quotable;
 use walkdir::WalkDir;
@@ -49,11 +46,30 @@ impl Default for Attributes {
     }
 }
 
+impl CopierBuilder {
+    pub fn try_attrs<T, I>(&mut self, attrs: T) -> Result<&mut Self>
+    where
+        T: IntoIterator<Item = (String, I)>,
+        I: TryInto<OptionAttrs, Error = Error>,
+    {
+        let a = attrs
+            .into_iter()
+            .map(|(m, a)| {
+                let g = GlobBuilder::new(&m).literal_separator(true).build()?;
+                let a = TryInto::<OptionAttrs>::try_into(a)?;
+                Ok::<_, Error>((g.compile_matcher(), a))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.path_attrs = Some(Some(a));
+        Ok(self)
+    }
+}
+
 #[derive(Clone, Debug, Default, Builder, Getters)]
 #[builder(setter(into, strip_option), default)]
 #[getset(get = "pub")]
 pub struct Copier {
-    path_attrs: Option<HashMap<PathBuf, OptionAttrs>>,
+    path_attrs: Option<Vec<(GlobMatcher, OptionAttrs)>>,
     attrs: Attributes,
 }
 
@@ -116,7 +132,11 @@ impl Copier {
             let (uid, gid) = self
                 .path_attrs
                 .as_ref()
-                .and_then(|v| v.get(src).map(|a| (a.uid, a.gid)))
+                .and_then(|v| {
+                    v.iter()
+                        .find(|(m, _)| m.is_match(src))
+                        .map(|(_, a)| (a.uid, a.gid))
+                })
                 .unwrap_or_default();
             if uid.is_some() || gid.is_some() || self.attrs.ownership {
                 let (uid, gid) = (
@@ -145,10 +165,11 @@ impl Copier {
             }
 
             use std::os::unix::prelude::{MetadataExt, PermissionsExt};
-            let new_mode = self
-                .path_attrs
-                .as_ref()
-                .and_then(|v| v.get(dst).and_then(|a| a.mode));
+            let new_mode = self.path_attrs.as_ref().and_then(|v| {
+                v.iter()
+                    .find(|(m, _)| m.is_match(src))
+                    .and_then(|(_, a)| a.mode)
+            });
             // The `chmod()` system call that underlies the
             // `fs::set_permissions()` call is unable to change the
             // permissions of a symbolic link. In that case, we just

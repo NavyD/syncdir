@@ -466,12 +466,11 @@ impl TestEnv {
         #[cfg(unix)]
         {
             let (src_meta, dst_meta) = (metadata(src).unwrap(), metadata(dst).unwrap());
-            if let Some(mode) = self
-                .copier
-                .path_attrs()
-                .as_ref()
-                .and_then(|a| a.get(src).and_then(|oa| oa.mode))
-            {
+            if let Some(mode) = self.copier.path_attrs().as_ref().and_then(|a| {
+                a.iter()
+                    .find(|(m, _)| m.is_match(src))
+                    .and_then(|(_, a)| a.mode)
+            }) {
                 use std::os::unix::fs::PermissionsExt;
                 let mut src_perm = src_meta.permissions();
                 src_perm.set_mode(mode);
