@@ -90,7 +90,7 @@ fn test_sync_back<'a, T, E, P>(
         .with_copier(CopierBuilder::default().build().unwrap());
 
     let sync = SyncerBuilder::default()
-        .copier(te.copier().clone())
+        .apply_copier(te.copier().clone())
         .last_dsts_srv(te.last_dsts_srv().clone())
         .dst(te.dst_root())
         .src(te.src_root())
@@ -123,7 +123,7 @@ fn test_apply<'a, T, E, P>(
         .with_copier(CopierBuilder::default().build().unwrap());
 
     let sync = SyncerBuilder::default()
-        .copier(te.copier().clone())
+        .apply_copier(te.copier().clone())
         .last_dsts_srv(te.last_dsts_srv().clone())
         .dst(te.dst_root())
         .src(te.src_root())
@@ -156,7 +156,7 @@ fn test_clean_dst<'a, T, E, P>(
         .with_copier(CopierBuilder::default().build().unwrap());
 
     let sync = SyncerBuilder::default()
-        .copier(te.copier().clone())
+        .apply_copier(te.copier().clone())
         .last_dsts_srv(te.last_dsts_srv().clone())
         .dst(te.dst_root())
         .src(te.src_root())

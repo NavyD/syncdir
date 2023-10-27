@@ -1,5 +1,5 @@
-use crate::cp::OptionAttrs;
-use anyhow::bail;
+use crate::cp::{Attributes, Copier, CopierBuilder, OptionAttrs};
+use anyhow::{bail, Error};
 use indexmap::IndexMap;
 use log::{debug, warn};
 #[cfg(unix)]
@@ -7,22 +7,38 @@ use nix::unistd::{Group, User};
 use serde::Deserialize;
 
 #[derive(Deserialize, Default, Debug)]
-pub struct Attributes {
+pub struct GlobAttributes {
     user: Option<String>,
     group: Option<String>,
     mode: Option<u32>,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct Config {
-    #[serde(rename = "attrs")]
-    pub path_attrs: IndexMap<String, Attributes>,
+pub struct CopyAttributes {
+    pub mode: Option<bool>,
+    pub ownership: Option<bool>,
+    pub timestamps: Option<bool>,
+    pub xattr: Option<bool>,
+    pub all: Option<bool>,
 }
 
-impl TryFrom<Attributes> for OptionAttrs {
+#[derive(Deserialize, Debug)]
+pub struct CopierOpt {
+    #[serde(rename = "attrs")]
+    pub glob_attrs: IndexMap<String, GlobAttributes>,
+    pub copy: CopyAttributes,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Config {
+    pub apply: Option<CopierOpt>,
+    pub back: Option<CopierOpt>,
+}
+
+impl TryFrom<GlobAttributes> for OptionAttrs {
     type Error = anyhow::Error;
 
-    fn try_from(a: Attributes) -> Result<Self, Self::Error> {
+    fn try_from(a: GlobAttributes) -> Result<Self, Self::Error> {
         let uid = if let Some(name) = a.user {
             if cfg!(unix) {
                 debug!("Looking up user by name {}", name);
@@ -68,5 +84,41 @@ impl TryFrom<Attributes> for OptionAttrs {
             mode: a.mode,
             uid,
         })
+    }
+}
+
+impl From<CopyAttributes> for Attributes {
+    fn from(v: CopyAttributes) -> Self {
+        let mut a = if v.all.unwrap_or_default() {
+            Attributes::all()
+        } else {
+            Default::default()
+        };
+
+        if v.mode.unwrap_or_default() {
+            a.mode = true
+        }
+        if v.ownership.unwrap_or_default() {
+            a.ownership = true
+        }
+        if v.timestamps.unwrap_or_default() {
+            a.timestamps = true
+        }
+        if v.xattr.unwrap_or_default() {
+            a.xattr = true
+        }
+        a
+    }
+}
+
+impl TryFrom<CopierOpt> for Copier {
+    type Error = Error;
+
+    fn try_from(value: CopierOpt) -> Result<Self, Self::Error> {
+        CopierBuilder::default()
+            .attrs(value.copy)
+            .try_glob_attrs(value.glob_attrs)?
+            .build()
+            .map_err(Into::into)
     }
 }

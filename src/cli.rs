@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     config::Config,
-    cp::CopierBuilder,
+    cp::{Attributes, CopierBuilder},
     service::{LastDestinationListService, LastDestinationListServiceBuilder},
     sync::{SyncPath, Syncer, SyncerBuilder},
     CRATE_NAME,
@@ -176,24 +176,34 @@ impl Opts {
             fs::create_dir_all(&self.config_dir)?;
         }
 
+        let (apply_cp, back_cp) = (
+            CopierBuilder::default().attrs(Attributes::all()).build()?,
+            CopierBuilder::default()
+                .attrs(Attributes::no_attrs())
+                .build()?,
+        );
+
         let conf_path = self.config_dir.join("config.toml");
-        let cp = if conf_path.exists() {
+        let (apply_cp, back_cp) = if conf_path.exists() {
             debug!("Loading config from {}", conf_path.quote());
             let config = toml::from_str::<Config>(&fs::read_to_string(conf_path)?)?;
             trace!("Loaded config: {:?}", config);
-            CopierBuilder::default()
-                .try_attrs(config.path_attrs)?
-                .build()?
+
+            (
+                config.apply.map_or(Ok(apply_cp), TryInto::try_into)?,
+                config.back.map_or(Ok(back_cp), TryInto::try_into)?,
+            )
         } else {
             debug!("Skipped load config for non exists {}", conf_path.quote());
-            CopierBuilder::default().build()?
+            (apply_cp, back_cp)
         };
 
         SyncerBuilder::default()
             .try_src(&sub_opts.src)?
             .try_dst(&sub_opts.dst)?
             .dry_run(sub_opts.dry_run)
-            .copier(cp)
+            .apply_copier(apply_cp)
+            .back_copier(back_cp)
             .last_dsts_srv(self.build_last_dsts_srv()?)
             .build()
             .map_err(Into::into)

@@ -99,7 +99,10 @@ pub struct Syncer {
 
     /// 同步复制实现
     #[builder(default)]
-    copier: Copier,
+    back_copier: Copier,
+
+    #[builder(default)]
+    apply_copier: Copier,
 
     #[builder(default = "false")]
     dry_run: bool,
@@ -222,7 +225,7 @@ impl Syncer {
                                         get_path_ty(&src),
                                         src.quote(),
                                     );
-                                    self.copier.copy_file_or_dir_only(&dst, &src)?;
+                                    self.back_copier.copy_file_or_dir_only(&dst, &src)?;
                                     if curr_srcs.contains(&src) {
                                         SyncPath::Overriden(dst, src)
                                     } else {
@@ -258,6 +261,7 @@ impl Syncer {
         T: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
+        let cp = &self.apply_copier;
         let target_dsts = self.get_absolute_target_dsts(target_dsts)?;
         WalkDir::new(&self.src)
             .contents_first(true)
@@ -291,7 +295,7 @@ impl Syncer {
                         src.quote(),
                     );
                     return Ok::<_, Error>(if self.confirm_rm(&dst)? {
-                        self.copier.copy_file(&src, &dst)?;
+                        cp.copy_file(&src, &dst)?;
                         Some(SyncPath::Overriden(src, dst))
                     } else {
                         None
@@ -307,9 +311,9 @@ impl Syncer {
                     );
                     if !src.is_symlink() && src.is_dir() {
                         fs::create_dir_all(&dst)?;
-                        self.copier.copy_file_or_dir_only(&src, &dst)?;
+                        cp.copy_file_or_dir_only(&src, &dst)?;
                     } else {
-                        self.copier.copy_file(&src, &dst)?;
+                        cp.copy_file(&src, &dst)?;
                     }
                     return Ok(Some(SyncPath::Coppied(src, dst)));
                 }
@@ -322,11 +326,11 @@ impl Syncer {
                     dst.quote(),
                 );
                 Ok(if !src.is_symlink() && src.is_dir() {
-                    self.copier.copy_file_or_dir_only(&src, &dst)?;
+                    cp.copy_file_or_dir_only(&src, &dst)?;
                     Some(SyncPath::Overriden(src, dst))
                 } else if self.confirm_rm(&dst)? {
                     fs::create_dir(&dst)?;
-                    self.copier.copy_file_or_dir_only(&src, &dst)?;
+                    cp.copy_file_or_dir_only(&src, &dst)?;
                     Some(SyncPath::Overriden(src, dst))
                 } else {
                     None
@@ -600,7 +604,7 @@ impl Syncer {
                         dst.quote(),
                     );
                     return Ok(if self.confirm_rm(&src)? {
-                        self.copier.copy_file(&dst, &src)?;
+                        self.back_copier.copy_file(&dst, &src)?;
                         Some(SyncPath::Overriden(dst, src))
                     } else {
                         None
@@ -631,11 +635,11 @@ impl Syncer {
                     dst.quote(),
                 );
                 Ok(if src.is_dir() {
-                    self.copier.copy_file_or_dir_only(&dst, &src)?;
+                    self.back_copier.copy_file_or_dir_only(&dst, &src)?;
                     Some(SyncPath::Overriden(dst, src))
                 } else if self.confirm_rm(&src)? {
                     fs::create_dir(&src)?;
-                    self.copier.copy_file_or_dir_only(&dst, &src)?;
+                    self.back_copier.copy_file_or_dir_only(&dst, &src)?;
                     Some(SyncPath::Overriden(dst, src))
                 } else {
                     None

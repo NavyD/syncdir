@@ -14,9 +14,9 @@ use crate::util;
 #[derive(Clone, Debug, Default)]
 pub struct OptionAttrs {
     pub mode: Option<u32>,
-    #[cfg(target_family = "unix")]
+    #[cfg(unix)]
     pub uid: Option<u32>,
-    #[cfg(target_family = "unix")]
+    #[cfg(unix)]
     pub gid: Option<u32>,
 }
 
@@ -28,6 +28,7 @@ pub struct Attributes {
     /// 是否保留目录文件amtimes
     pub timestamps: bool,
     /// 是否跟随软链接。默认为false
+    #[cfg(unix)]
     pub xattr: bool,
     // /// 是否保持硬链接
     // links: bool,
@@ -35,19 +36,36 @@ pub struct Attributes {
 
 impl Default for Attributes {
     fn default() -> Self {
+        Self::no_attrs()
+    }
+}
+
+impl Attributes {
+    pub fn no_attrs() -> Self {
+        Self {
+            mode: false,
+            timestamps: false,
+            #[cfg(unix)]
+            ownership: false,
+            #[cfg(unix)]
+            xattr: false,
+        }
+    }
+
+    pub fn all() -> Self {
         Self {
             mode: true,
-            #[cfg(target_family = "unix")]
-            ownership: false,
             timestamps: true,
+            #[cfg(unix)]
+            ownership: true,
+            #[cfg(unix)]
             xattr: true,
-            // links: true,
         }
     }
 }
 
 impl CopierBuilder {
-    pub fn try_attrs<T, I>(&mut self, attrs: T) -> Result<&mut Self>
+    pub fn try_glob_attrs<T, I>(&mut self, attrs: T) -> Result<&mut Self>
     where
         T: IntoIterator<Item = (String, I)>,
         I: TryInto<OptionAttrs, Error = Error>,
@@ -60,7 +78,7 @@ impl CopierBuilder {
                 Ok::<_, Error>((g.compile_matcher(), a))
             })
             .collect::<Result<Vec<_>>>()?;
-        self.path_attrs = Some(Some(a));
+        self.glob_attrs = Some(Some(a));
         Ok(self)
     }
 }
@@ -69,7 +87,8 @@ impl CopierBuilder {
 #[builder(setter(into, strip_option), default)]
 #[getset(get = "pub")]
 pub struct Copier {
-    path_attrs: Option<Vec<(GlobMatcher, OptionAttrs)>>,
+    #[builder(setter(custom))]
+    glob_attrs: Option<Vec<(GlobMatcher, OptionAttrs)>>,
     attrs: Attributes,
 }
 
@@ -130,7 +149,7 @@ impl Copier {
         #[cfg(unix)]
         {
             let (uid, gid) = self
-                .path_attrs
+                .glob_attrs
                 .as_ref()
                 .and_then(|v| {
                     v.iter()
@@ -152,20 +171,22 @@ impl Copier {
                 nix::unistd::chown(dst, Some(uid.into()), Some(gid.into()))?;
             }
 
-            for xname in xattr::list(src)? {
-                if let Some(xval) = xattr::get(src, &xname)? {
-                    trace!(
-                        "Changing xattr {:?}={:?} for dst path {}",
-                        xname,
-                        xval,
-                        dst.quote()
-                    );
-                    xattr::set(dst, xname, &xval)?;
+            if self.attrs.xattr {
+                for xname in xattr::list(src)? {
+                    if let Some(xval) = xattr::get(src, &xname)? {
+                        trace!(
+                            "Changing xattr {:?}={:?} for dst path {}",
+                            xname,
+                            xval,
+                            dst.quote()
+                        );
+                        xattr::set(dst, xname, &xval)?;
+                    }
                 }
             }
 
             use std::os::unix::prelude::{MetadataExt, PermissionsExt};
-            let new_mode = self.path_attrs.as_ref().and_then(|v| {
+            let new_mode = self.glob_attrs.as_ref().and_then(|v| {
                 v.iter()
                     .find(|(m, _)| m.is_match(src))
                     .and_then(|(_, a)| a.mode)
