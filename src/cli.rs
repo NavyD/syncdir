@@ -19,7 +19,18 @@ use serde::Deserialize;
 use toml::Table;
 
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
+#[command(author, about, version = format!(
+    r#"{}
+git commit: {}
+git desc: {}
+build date: {}
+rustc version: {}"#,
+    env!("CARGO_PKG_VERSION"),
+    env!("VERGEN_GIT_SHA"),
+    env!("VERGEN_GIT_DESCRIBE"),
+    env!("VERGEN_BUILD_TIMESTAMP"),
+    env!("VERGEN_RUSTC_SEMVER"),
+))]
 pub struct Opts {
     /// log level
     #[arg(short, long, default_value_t = 0, action = clap::ArgAction::Count, value_parser = value_parser!(u8).range(0..=5))]

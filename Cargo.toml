@@ -44,3 +44,6 @@ pretty_assertions = "1.4.0"
 rstest = "0.18.2"
 tempfile = "3.8.0"
 uuid = { version = "1.4.1", features = ["v4"] }
+
+[build-dependencies]
+vergen = { version = "8", features = ["build", "git", "rustc", "gitoxide"] }
