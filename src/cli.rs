@@ -10,7 +10,7 @@ use crate::{
     sync::{SyncPath, Syncer, SyncerBuilder},
     CRATE_NAME,
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::{value_parser, Parser, Subcommand};
 use directories::ProjectDirs;
 use log::{debug, trace, warn, LevelFilter};
@@ -193,15 +193,8 @@ impl Opts {
             fs::create_dir_all(&self.config_dir)?;
         }
 
-        let (apply_cp, back_cp) = (
-            CopierBuilder::default().attrs(Attributes::all()).build()?,
-            CopierBuilder::default()
-                .attrs(Attributes::no_attrs())
-                .build()?,
-        );
         let conf_path = self.config_dir.join("config.toml");
-
-        let config = if let Some(p) = &self.chezmoi_conf {
+        let mut config = if let Some(p) = &self.chezmoi_conf {
             debug!("Loading config from chezmoi conf {}", p.quote());
             toml::from_str::<Table>(&fs::read_to_string(p)?)?
                 .get("data")
@@ -224,19 +217,50 @@ impl Opts {
             None
         };
 
-        let (apply_cp, back_cp) = if let Some(config) = config {
+        let (apply_cp, back_cp) = (
+            CopierBuilder::default().attrs(Attributes::all()).build()?,
+            CopierBuilder::default()
+                .attrs(Attributes::no_attrs())
+                .build()?,
+        );
+        let (apply_cp, back_cp) = if let Some(config) = config.as_mut() {
             trace!("Loaded config: {:?}", config);
             (
-                config.apply.map_or(Ok(apply_cp), TryInto::try_into)?,
-                config.back.map_or(Ok(back_cp), TryInto::try_into)?,
+                config
+                    .apply
+                    .take()
+                    .map_or(Ok(apply_cp), TryInto::try_into)?,
+                config.back.take().map_or(Ok(back_cp), TryInto::try_into)?,
             )
         } else {
             (apply_cp, back_cp)
         };
 
+        debug!(
+            "Finding syncdir src,dst with arg {:?} and config {:?}",
+            (&sub_opts.src, &sub_opts.dst),
+            config.as_ref().map(|c| (c.src.as_ref(), c.dst.as_ref())),
+        );
+        let src = if sub_opts.src == SubOpts::default_empty_path() {
+            config
+                .as_ref()
+                .and_then(|c| c.src.as_ref())
+                .ok_or_else(|| anyhow!("Invalid src arg"))?
+        } else {
+            &sub_opts.src
+        };
+        let dst = if sub_opts.dst == SubOpts::default_empty_path() {
+            config
+                .as_ref()
+                .and_then(|c| c.dst.as_ref())
+                .ok_or_else(|| anyhow!("Invalid dst arg"))?
+        } else {
+            &sub_opts.dst
+        };
+
         SyncerBuilder::default()
-            .try_src(&sub_opts.src)?
-            .try_dst(&sub_opts.dst)?
+            .try_src(src)?
+            .try_dst(dst)?
             .dry_run(sub_opts.dry_run)
             .apply_copier(apply_cp)
             .back_copier(back_cp)
@@ -248,10 +272,12 @@ impl Opts {
 
 #[derive(clap::Args, Debug, Clone)]
 struct SubOpts {
-    #[arg(short, long, default_value = ".")]
+    /// 需要同步到dst的源目录。 默认为空，如果在配置文件中和命令行中都未指定则会错误退出
+    #[arg(short, long, default_value = Self::default_empty_path().into_os_string())]
     src: PathBuf,
 
-    #[arg(short, long)]
+    /// 需要从src同步到的目标目录。 默认为空，如果在配置文件中和命令行中都未指定则会错误退出
+    #[arg(short, long, default_value = Self::default_empty_path().into_os_string())]
     dst: PathBuf,
 
     #[arg(short, long)]
@@ -268,6 +294,10 @@ impl SubOpts {
         } else {
             ""
         }
+    }
+
+    fn default_empty_path() -> PathBuf {
+        PathBuf::from("")
     }
 }
 

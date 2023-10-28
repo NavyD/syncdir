@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::cp::{Attributes, Copier, CopierBuilder, OptionAttrs};
 use anyhow::{bail, Error};
 use indexmap::IndexMap;
@@ -33,6 +35,8 @@ pub struct CopierOpt {
 pub struct Config {
     pub apply: Option<CopierOpt>,
     pub back: Option<CopierOpt>,
+    pub src: Option<PathBuf>,
+    pub dst: Option<PathBuf>,
 }
 
 impl TryFrom<GlobAttributes> for OptionAttrs {
