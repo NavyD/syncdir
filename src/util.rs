@@ -4,8 +4,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use log::debug;
+use log::{debug, warn};
 use os_display::Quotable;
+use walkdir::WalkDir;
 
 pub fn map_path<P, Q, R>(src: P, src_base: Q, dst_base: R) -> Result<PathBuf>
 where
@@ -81,6 +82,26 @@ pub fn try_remove(p: impl AsRef<Path>) -> io::Result<()> {
             io::ErrorKind::NotFound => {}
             _ => return io::Result::Err(e),
         }
+    }
+    Ok(())
+}
+
+pub fn clean_empty_dirs(p: impl AsRef<Path>) -> io::Result<()> {
+    for e in WalkDir::new(p).contents_first(true).into_iter() {
+        let p = e?.into_path();
+        #[allow(clippy::blocks_in_if_conditions)]
+        if !p.is_dir()
+            || p.read_dir()
+                .map(|mut d| d.next().is_some())
+                .unwrap_or_else(|e| {
+                    warn!("Read dir {} error {}", p.quote(), e);
+                    false
+                })
+        {
+            continue;
+        }
+        debug!("Removing empty dir {}", p.quote());
+        fs::remove_dir(p)?;
     }
     Ok(())
 }

@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 use crate::{
     cp::Copier,
     service::LastDestinationListService,
-    util::{self, get_path_ty},
+    util::{self, clean_empty_dirs, get_path_ty},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -182,7 +182,7 @@ impl Syncer {
         }
 
         // sync back from last dsts to src
-        target_dsts
+        let res = target_dsts
             .into_iter()
             .map(|t_dst| {
                 let src = self.get_src_path(&t_dst)?;
@@ -244,7 +244,9 @@ impl Syncer {
                 Ok::<_, Error>(paths_it)
             })
             .flatten_ok()
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>();
+        clean_empty_dirs(&self.src)?;
+        res
     }
 
     /// 将src中的文件同步到指定的target_dsts中。扫描src目录，并找到对应的dst目录dsts，
@@ -559,7 +561,7 @@ impl Syncer {
             );
         }
 
-        WalkDir::new(&self.src)
+        let res = WalkDir::new(&self.src)
             .into_iter()
             .map(|entry| {
                 let entry = entry?;
@@ -648,7 +650,9 @@ impl Syncer {
             .filter(|res| res.as_ref().map(|opt| opt.is_some()).unwrap_or(true))
             // safety: filter some
             .map(|res| res.map(|opt| opt.unwrap()))
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>();
+        clean_empty_dirs(&self.src)?;
+        res
     }
 
     /// 遍历src目录找到所有文件
