@@ -29,7 +29,7 @@ pub struct CopierOpt {
     pub copy: CopyAttributes,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct Config {
     pub apply: Option<CopierOpt>,
     pub back: Option<CopierOpt>,

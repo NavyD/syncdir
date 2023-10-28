@@ -13,8 +13,10 @@ use crate::{
 use anyhow::{bail, Result};
 use clap::{value_parser, Parser, Subcommand};
 use directories::ProjectDirs;
-use log::{debug, trace, LevelFilter};
+use log::{debug, trace, warn, LevelFilter};
 use os_display::Quotable;
+use serde::Deserialize;
+use toml::Table;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -27,6 +29,10 @@ pub struct Opts {
         .map(|p| p.config_dir().display().to_string())
         .unwrap_or_default())]
     config_dir: PathBuf,
+
+    /// 从chezmoi.toml中加载key: `[data.syncdir]`中的配置
+    #[arg(short = 'C', long)]
+    chezmoi_conf: Option<PathBuf>,
 
     #[command(subcommand)]
     command: OptCommand,
@@ -182,19 +188,38 @@ impl Opts {
                 .attrs(Attributes::no_attrs())
                 .build()?,
         );
-
         let conf_path = self.config_dir.join("config.toml");
-        let (apply_cp, back_cp) = if conf_path.exists() {
-            debug!("Loading config from {}", conf_path.quote());
-            let config = toml::from_str::<Config>(&fs::read_to_string(conf_path)?)?;
-            trace!("Loaded config: {:?}", config);
 
+        let config = if let Some(p) = &self.chezmoi_conf {
+            debug!("Loading config from chezmoi conf {}", p.quote());
+            toml::from_str::<Table>(&fs::read_to_string(p)?)?
+                .get("data")
+                .and_then(|v| v.get(CRATE_NAME))
+                .map_or_else(
+                    || {
+                        warn!(
+                            "Not found key `[data.{}]` in chezmoi config {}",
+                            CRATE_NAME,
+                            p.quote()
+                        );
+                        Ok(None)
+                    },
+                    |v| Config::deserialize(v.clone()).map(Some),
+                )?
+        } else if conf_path.exists() {
+            debug!("Loading config from {}", conf_path.quote());
+            Some(toml::from_str::<Config>(&fs::read_to_string(conf_path)?)?)
+        } else {
+            None
+        };
+
+        let (apply_cp, back_cp) = if let Some(config) = config {
+            trace!("Loaded config: {:?}", config);
             (
                 config.apply.map_or(Ok(apply_cp), TryInto::try_into)?,
                 config.back.map_or(Ok(back_cp), TryInto::try_into)?,
             )
         } else {
-            debug!("Skipped load config for non exists {}", conf_path.quote());
             (apply_cp, back_cp)
         };
 
