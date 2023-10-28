@@ -26,7 +26,7 @@ pub struct CopyAttributes {
 
 #[derive(Deserialize, Debug)]
 pub struct CopierOpt {
-    #[serde(rename = "attrs")]
+    #[serde(rename = "attrs", default)]
     pub glob_attrs: IndexMap<String, GlobAttributes>,
     pub copy: CopyAttributes,
 }
@@ -124,5 +124,19 @@ impl TryFrom<CopierOpt> for Copier {
             .try_glob_attrs(value.glob_attrs)?
             .build()
             .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allow_glob_attrs_empty() {
+        let s = r#"
+[apply.copy]
+all = true
+        "#;
+        toml::from_str::<Config>(s).unwrap();
     }
 }
