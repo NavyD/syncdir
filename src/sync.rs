@@ -8,6 +8,7 @@ use std::{
 use anyhow::{bail, Context, Error, Result};
 use derive_builder::Builder;
 use dialoguer::{theme::ColorfulTheme, Confirm};
+use getset::Getters;
 use itertools::Itertools;
 use log::{debug, info, log_enabled, trace, warn};
 use os_display::Quotable;
@@ -83,8 +84,9 @@ impl SyncerBuilder {
 }
 
 /// 将src目录内容同步到dst目录中
-#[derive(Debug, Clone, Builder)]
+#[derive(Debug, Clone, Builder, Getters)]
 #[builder(setter(into), build_fn(validate = "Self::validate"))]
+#[getset(get = "pub")]
 pub struct Syncer {
     /// 要求使用已存在的绝对路径
     #[builder(setter(into))]

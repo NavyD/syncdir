@@ -107,8 +107,8 @@ impl Opts {
         let sync = self.build_syncer(sub_opts)?;
         println!(
             "Syncing back from destination {} to source {}{}",
-            sub_opts.dst.display(),
-            sub_opts.src.display(),
+            sync.dst().quote(),
+            sync.src().quote(),
             sub_opts.dry_str(),
         );
         let paths = sync.sync_back(sub_opts.target_dsts.as_deref().unwrap_or_default())?;
@@ -133,8 +133,8 @@ impl Opts {
         let dry_str = sub_opts.dry_str();
         println!(
             "Syncing source {} to destination {}{}",
-            sub_opts.src.display(),
-            sub_opts.dst.display(),
+            sync.dst().quote(),
+            sync.src().quote(),
             dry_str,
         );
         let paths = sync.apply_to_dst(target_dsts)?;
@@ -148,7 +148,7 @@ impl Opts {
         );
 
         println!();
-        println!("Cleaning destination {}{}", sub_opts.dst.display(), dry_str);
+        println!("Cleaning destination {}{}", sync.dst().quote(), dry_str);
         let paths = sync.clean_dst(target_dsts)?;
         let total = paths.len();
         for p in paths {
@@ -241,22 +241,24 @@ impl Opts {
             (&sub_opts.src, &sub_opts.dst),
             config.as_ref().map(|c| (c.src.as_ref(), c.dst.as_ref())),
         );
-        let src = if sub_opts.src == SubOpts::default_empty_path() {
-            config
-                .as_ref()
-                .and_then(|c| c.src.as_ref())
-                .ok_or_else(|| anyhow!("Invalid src arg"))?
-        } else {
-            &sub_opts.src
-        };
-        let dst = if sub_opts.dst == SubOpts::default_empty_path() {
-            config
-                .as_ref()
-                .and_then(|c| c.dst.as_ref())
-                .ok_or_else(|| anyhow!("Invalid dst arg"))?
-        } else {
-            &sub_opts.dst
-        };
+        let src = sub_opts.src.as_ref().map_or_else(
+            || {
+                config
+                    .as_ref()
+                    .and_then(|c| c.src.as_ref())
+                    .ok_or_else(|| anyhow!("Invalid src arg"))
+            },
+            Ok,
+        )?;
+        let dst = sub_opts.dst.as_ref().map_or_else(
+            || {
+                config
+                    .as_ref()
+                    .and_then(|c| c.dst.as_ref())
+                    .ok_or_else(|| anyhow!("Invalid dst arg"))
+            },
+            Ok,
+        )?;
 
         SyncerBuilder::default()
             .try_src(src)?
@@ -273,12 +275,12 @@ impl Opts {
 #[derive(clap::Args, Debug, Clone)]
 struct SubOpts {
     /// 需要同步到dst的源目录。 默认为空，如果在配置文件中和命令行中都未指定则会错误退出
-    #[arg(short, long, default_value = Self::default_empty_path().into_os_string())]
-    src: PathBuf,
+    #[arg(short, long)]
+    src: Option<PathBuf>,
 
     /// 需要从src同步到的目标目录。 默认为空，如果在配置文件中和命令行中都未指定则会错误退出
-    #[arg(short, long, default_value = Self::default_empty_path().into_os_string())]
-    dst: PathBuf,
+    #[arg(short, long)]
+    dst: Option<PathBuf>,
 
     #[arg(short, long)]
     target_dsts: Option<Vec<PathBuf>>,
@@ -294,10 +296,6 @@ impl SubOpts {
         } else {
             ""
         }
-    }
-
-    fn default_empty_path() -> PathBuf {
-        PathBuf::from("")
     }
 }
 
