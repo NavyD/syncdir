@@ -45,7 +45,7 @@ jobs:
           - stable
           # - beta
     runs-on: ${{matrix.os}}
-    name: ${{ matrix.toolchain }} / clippy
+    name: ${{matrix.os}} / ${{ matrix.toolchain }} / clippy
     permissions:
       contents: read
       checks: write
@@ -85,7 +85,7 @@ jobs:
           - windows-latest
           - ubuntu-latest
     runs-on: ${{matrix.os}}
-    name: ${{matrix.os}} / stable / features
+    name: ${{matrix.os}} / stable / hack features
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,7 +108,7 @@ jobs:
         msrv:
           - 1.73.0
     runs-on: ${{matrix.os}}
-    name: ${{matrix.os}} / ${{ matrix.msrv }}
+    name: ${{matrix.os}} / msrv / ${{ matrix.msrv }}
     steps:
       - uses: actions/checkout@v4
         with:
