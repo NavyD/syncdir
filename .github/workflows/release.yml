@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - v[0-9]+.[0-9]+.[0-9]+*
+permissions:
+  contents: write
 jobs:
   release:
     name: Publish to Github Releases
@@ -87,6 +89,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cross
+      - uses: Swatinem/rust-cache@v2
       - name: Show Version Information (Rust, cargo, GCC)
         shell: bash
         run: |
