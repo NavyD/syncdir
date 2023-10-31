@@ -1,9 +1,9 @@
-pub mod service;
-pub mod util;
-pub mod sync;
 pub mod cli;
-pub mod cp;
 pub mod config;
+pub mod cp;
+pub mod service;
+pub mod sync;
+pub mod util;
 
 pub static CRATE_NAME: &str = env!("CARGO_CRATE_NAME");
 
