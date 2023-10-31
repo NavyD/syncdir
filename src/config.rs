@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 use std::path::PathBuf;
 
 use crate::cp::{Attributes, Copier, CopierBuilder, OptionAttrs};
@@ -42,16 +43,21 @@ pub struct Config {
 impl TryFrom<GlobAttributes> for OptionAttrs {
     type Error = anyhow::Error;
 
+    #[allow(unused_variables)]
     fn try_from(a: GlobAttributes) -> Result<Self, Self::Error> {
-        let uid = if let Some(name) = a.user {
-            if cfg!(unix) {
+        let uid: Option<u32> = if let Some(name) = a.user {
+            #[cfg(unix)]
+            {
                 debug!("Looking up user by name {}", name);
                 if let Some(u) = User::from_name(&name)? {
                     Some(u.uid.as_raw())
                 } else {
                     bail!("Found none user by name {}", name)
                 }
-            } else {
+            }
+
+            #[cfg(not(unix))]
+            {
                 warn!(
                     "Ignoring config user {} on unsupported os {}",
                     name,
@@ -63,15 +69,19 @@ impl TryFrom<GlobAttributes> for OptionAttrs {
             None
         };
 
-        let gid = if let Some(name) = a.group {
-            if cfg!(unix) {
+        let gid: Option<u32> = if let Some(name) = a.group {
+            #[cfg(unix)]
+            {
                 debug!("Looking up group by name {}", name);
                 if let Some(g) = Group::from_name(&name)? {
                     Some(g.gid.as_raw())
                 } else {
                     bail!("Found none group by name {}", name)
                 }
-            } else {
+            }
+
+            #[cfg(not(unix))]
+            {
                 warn!(
                     "Ignoring config group {} on unsupported os {}",
                     name,
@@ -84,9 +94,11 @@ impl TryFrom<GlobAttributes> for OptionAttrs {
         };
 
         Ok(Self {
+            #[cfg(unix)]
             gid,
-            mode: a.mode,
+            #[cfg(unix)]
             uid,
+            mode: a.mode,
         })
     }
 }
@@ -102,14 +114,17 @@ impl From<CopyAttributes> for Attributes {
         if v.mode.unwrap_or_default() {
             a.mode = true
         }
-        if v.ownership.unwrap_or_default() {
-            a.ownership = true
-        }
         if v.timestamps.unwrap_or_default() {
             a.timestamps = true
         }
-        if v.xattr.unwrap_or_default() {
-            a.xattr = true
+        #[cfg(unix)]
+        {
+            if v.ownership.unwrap_or_default() {
+                a.ownership = true
+            }
+            if v.xattr.unwrap_or_default() {
+                a.xattr = true
+            }
         }
         a
     }
