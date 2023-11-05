@@ -223,15 +223,40 @@ impl Opts {
                 .attrs(Attributes::no_attrs())
                 .build()?,
         );
+
         let (apply_cp, back_cp) = if let Some(config) = config.as_mut() {
-            trace!("Loaded config: {:?}", config);
-            (
-                config
-                    .apply
-                    .take()
-                    .map_or(Ok(apply_cp), TryInto::try_into)?,
-                config.back.take().map_or(Ok(back_cp), TryInto::try_into)?,
-            )
+            trace!("Trying to convert config into Copier: {:?}", config);
+            let apply_cp = if let Some(apply) = config.apply.take() {
+                match apply.try_into() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let OptCommand::Sync { sub_opts: _ } = &self.command {
+                            warn!("Ignored incorrect apply config during sync: {}", e);
+                            apply_cp
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            } else {
+                apply_cp
+            };
+            let back_cp = if let Some(back) = config.back.take() {
+                match back.try_into() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let OptCommand::Apply { sub_opts: _ } = &self.command {
+                            warn!("Ignored incorrect back config during apply: {}", e);
+                            back_cp
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            } else {
+                back_cp
+            };
+            (apply_cp, back_cp)
         } else {
             (apply_cp, back_cp)
         };
