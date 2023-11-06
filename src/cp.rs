@@ -5,6 +5,7 @@ use derive_builder::Builder;
 use filetime::FileTime;
 use getset::Getters;
 use globset::{GlobBuilder, GlobMatcher};
+#[allow(unused_imports)]
 use itertools::Itertools;
 #[allow(unused_imports)]
 use log::{log_enabled, trace, warn};

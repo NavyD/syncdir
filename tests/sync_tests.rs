@@ -5,10 +5,9 @@ use std::{path::Path, sync::Once};
 use anyhow::{bail, Error};
 use common::{TestEnv, TreePath};
 use log::{warn, LevelFilter};
-use nix::unistd::User;
 use rstest::rstest;
 use syncdir::{
-    cp::{Attributes, Copier, CopierBuilder, OptionAttrs},
+    cp::{Attributes, Copier, CopierBuilder},
     sync::SyncerBuilder,
     CRATE_NAME,
 };
@@ -75,10 +74,13 @@ fn init() {
 }
 
 /// 提升权限运行`cargo test`参考：[Running tests with elevated privileges #5999](https://github.com/rust-lang/cargo/issues/5999)
+#[allow(unused)]
 fn build_apply_cp(globs: &[&str], user: Option<&str>) -> anyhow::Result<Copier> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         use caps::{CapSet, Capability};
+        use nix::unistd::User;
+        use syncdir::cp::OptionAttrs;
 
         let uid = if let Some(user) = user {
             User::from_name(user)?.map(|u| u.uid.as_raw())
@@ -107,7 +109,7 @@ fn build_apply_cp(globs: &[&str], user: Option<&str>) -> anyhow::Result<Copier> 
             .build()
             .map_err(Into::into)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
         bail!("unsupported")
     }
