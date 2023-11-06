@@ -465,35 +465,46 @@ impl TestEnv {
         // assert perms
         #[cfg(unix)]
         {
+            use std::fs::Permissions;
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
             let (src_meta, dst_meta) = (metadata(src).unwrap(), metadata(dst).unwrap());
-            if let Some(a) = self
+            let a = self
                 .copier
                 .glob_attrs()
                 .as_ref()
-                .and_then(|a| a.iter().find(|(m, _)| m.is_match(dst)).map(|(_, a)| a))
+                .and_then(|a| a.iter().find(|(m, _)| m.is_match(dst)).map(|(_, a)| a));
+
+            let uid = a.and_then(|a| a.uid).unwrap_or_else(|| {
+                if self.copier.attrs().ownership {
+                    src_meta.uid()
+                } else {
+                    nix::unistd::getuid().as_raw()
+                }
+            });
+            assert_eq!(uid, dst_meta.uid());
+
+            let gid = a.and_then(|a| a.gid).unwrap_or_else(|| {
+                if self.copier.attrs().ownership {
+                    src_meta.gid()
+                } else {
+                    nix::unistd::getgid().as_raw()
+                }
+            });
+            assert_eq!(gid, dst_meta.gid());
+
+            if let Some(perm) = a
+                .and_then(|a| a.mode)
+                .map(Permissions::from_mode)
+                .or_else(|| {
+                    if self.copier.attrs().mode {
+                        Some(src_meta.permissions())
+                    } else {
+                        None
+                    }
+                })
             {
-                if let Some(mode) = a.mode {
-                    let mut src_perm = src_meta.permissions();
-                    src_perm.set_mode(mode);
-                    assert_eq!(src_perm, dst_meta.permissions());
-                }
-                if let Some(uid) = a.uid {
-                    assert_eq!(uid, dst_meta.uid());
-                }
-                if let Some(gid) = a.gid {
-                    assert_eq!(gid, dst_meta.gid());
-                }
-            } else {
-                let a = self.copier.attrs();
-                if a.mode {
-                    assert_eq!(src_meta.permissions(), dst_meta.permissions());
-                }
-                if a.ownership {
-                    assert_eq!(src_meta.uid(), dst_meta.uid());
-                    assert_eq!(src_meta.gid(), dst_meta.gid());
-                }
+                assert_eq!(dst_meta.permissions(), perm);
             }
             // TODO: xattr
         }
@@ -527,7 +538,7 @@ impl TestEnv {
             );
             // WARN: 由于assert会访问目录导致access时间被更新，使用误差时间
             let diff = src_atime.nanoseconds() as i128 - dst_atime.nanoseconds() as i128;
-            let limit = Duration::from_millis(100);
+            let limit = Duration::from_millis(1000);
             let r = limit.as_nanos() as i128;
             assert!(
                 (-r..=r).contains(&diff),

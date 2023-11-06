@@ -163,20 +163,34 @@ fn test_apply<'a, T, E, P>(
     E: TryInto<TreePath<P>, Error = Error> + Clone,
     P: AsRef<Path>,
 {
-    let default_cp = CopierBuilder::default()
-        .attrs(Attributes::no_attrs())
-        .build()
-        .unwrap();
+    let cps = [
+        Some(
+            CopierBuilder::default()
+                .attrs(Attributes::all())
+                .build()
+                .unwrap(),
+        ),
+        Some(
+            CopierBuilder::default()
+                .attrs(Attributes {
+                    #[cfg(unix)]
+                    ownership: false,
+                    mode: false,
+                    ..Attributes::all()
+                })
+                .build()
+                .unwrap(),
+        ),
+        build_apply_cp(&["**/etc/**"], Some("nobody")).map_or_else(
+            |e| {
+                warn!("Unsupported apply copier for tests. using default cp: {e}");
+                None
+            },
+            Some,
+        ),
+    ];
 
-    let cps = match build_apply_cp(&["**/etc/**"], Some("nobody")) {
-        Ok(v) => vec![v, default_cp],
-        Err(e) => {
-            warn!("Unsupported apply copier for tests. using default cp: {e}");
-            vec![default_cp]
-        }
-    };
-
-    for cp in cps {
+    for cp in cps.into_iter().flatten() {
         let te = TestEnv::new(srcs.iter().cloned())
             .with_dsts(dsts.iter().cloned())
             .with_last_dsts_paths(last_dsts.iter().cloned())

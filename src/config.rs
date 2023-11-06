@@ -111,19 +111,19 @@ impl From<CopyAttributes> for Attributes {
             Default::default()
         };
 
-        if v.mode.unwrap_or_default() {
-            a.mode = true
+        if let Some(mode) = v.mode {
+            a.mode = mode
         }
-        if v.timestamps.unwrap_or_default() {
-            a.timestamps = true
+        if let Some(timestamps) = v.timestamps {
+            a.timestamps = timestamps
         }
         #[cfg(unix)]
         {
-            if v.ownership.unwrap_or_default() {
-                a.ownership = true
+            if let Some(ownership) = v.ownership {
+                a.ownership = ownership
             }
-            if v.xattr.unwrap_or_default() {
-                a.xattr = true
+            if let Some(xattr) = v.xattr {
+                a.xattr = xattr
             }
         }
         a
@@ -153,5 +153,27 @@ mod tests {
 all = true
         "#;
         toml::from_str::<Config>(s).unwrap();
+    }
+
+    #[test]
+    fn test_attributes_overriden_in_all() {
+        let s = r#"
+[apply.copy]
+all = true
+# overriden
+ownership = false
+mode = false
+"#;
+        let config = toml::from_str::<Config>(s).unwrap();
+        let ca = config.apply.map(|a| a.copy).unwrap();
+        let a: Attributes = ca.try_into().unwrap();
+        assert!(!a.mode);
+        assert!(a.timestamps);
+
+        #[cfg(unix)]
+        {
+            assert!(!a.ownership);
+            assert!(a.xattr);
+        }
     }
 }

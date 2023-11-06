@@ -179,23 +179,35 @@ impl Copier {
                     );
                     ugid
                 })
+                .map(|(uid, gid)| {
+                    (
+                        uid.or_else(|| {
+                            if self.attrs.ownership {
+                                Some(src_meta.uid())
+                            } else {
+                                None
+                            }
+                        }),
+                        gid.or_else(|| {
+                            if self.attrs.ownership {
+                                Some(src_meta.gid())
+                            } else {
+                                None
+                            }
+                        }),
+                    )
+                })
                 .unwrap_or_default();
-            if uid.is_some() || gid.is_some() || self.attrs.ownership {
-                let (uid, gid) = (
-                    uid.unwrap_or_else(|| src_meta.uid()),
-                    gid.unwrap_or_else(|| src_meta.gid()),
-                );
-                trace!(
-                    "Changing ownership {}:{} of dst path {}",
-                    uid,
-                    gid,
-                    dst.quote()
-                );
-                if dst_meta.is_symlink() {
-                    std::os::unix::fs::lchown(dst, Some(uid), Some(gid))?;
-                } else {
-                    std::os::unix::fs::chown(dst, Some(uid), Some(gid))?;
-                }
+            trace!(
+                "Changing ownership {:?}:{:?} of dst path {}",
+                uid,
+                gid,
+                dst.quote()
+            );
+            if dst_meta.is_symlink() {
+                std::os::unix::fs::lchown(dst, uid, gid)?;
+            } else {
+                std::os::unix::fs::chown(dst, uid, gid)?;
             }
 
             if self.attrs.xattr {
