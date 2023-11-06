@@ -292,7 +292,7 @@ impl Opts {
             Ok,
         )?;
 
-        SyncerBuilder::default()
+        let sync = SyncerBuilder::default()
             .try_src(src)?
             .try_dst(dst)?
             .dry_run(sub_opts.dry_run)
@@ -310,8 +310,9 @@ impl Opts {
                 },
             )
             .last_dsts_srv(self.build_last_dsts_srv()?)
-            .build()
-            .map_err(Into::into)
+            .build()?;
+        trace!("Builded syncer: {:?}", sync);
+        Ok(sync)
     }
 }
 

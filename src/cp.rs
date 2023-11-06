@@ -5,6 +5,7 @@ use derive_builder::Builder;
 use filetime::FileTime;
 use getset::Getters;
 use globset::{GlobBuilder, GlobMatcher};
+use itertools::Itertools;
 #[allow(unused_imports)]
 use log::{log_enabled, trace, warn};
 use os_display::Quotable;
@@ -66,15 +67,20 @@ impl Attributes {
 }
 
 impl CopierBuilder {
-    pub fn try_glob_attrs<T, I>(&mut self, attrs: T) -> Result<&mut Self>
+    pub fn try_glob_attrs<T, I, S>(&mut self, attrs: T) -> Result<&mut Self>
     where
-        T: IntoIterator<Item = (String, I)>,
-        I: TryInto<OptionAttrs, Error = Error>,
+        T: IntoIterator<Item = (S, I)>,
+        S: Into<String>,
+        I: TryInto<OptionAttrs>,
+        // Using TryInto generics with anyhow::Error: https://stackoverflow.com/a/72627328
+        anyhow::Error: From<I::Error>,
     {
         let a = attrs
             .into_iter()
             .map(|(m, a)| {
-                let g = GlobBuilder::new(&m).literal_separator(true).build()?;
+                let g = GlobBuilder::new(&m.into())
+                    .literal_separator(true)
+                    .build()?;
                 let a = TryInto::<OptionAttrs>::try_into(a)?;
                 Ok::<_, Error>((g.compile_matcher(), a))
             })
@@ -153,9 +159,24 @@ impl Copier {
                 .glob_attrs
                 .as_ref()
                 .and_then(|v| {
-                    v.iter()
-                        .find(|(m, _)| m.is_match(src))
-                        .map(|(_, a)| (a.uid, a.gid))
+                    if log_enabled!(log::Level::Trace) {
+                        trace!(
+                            "Finding uid/gid attrs by dst path {} match in {} globs: [{}]",
+                            dst.quote(),
+                            v.len(),
+                            v.iter().map(|(g, _)| g.glob().glob()).join(", ")
+                        );
+                    }
+                    let ugid = v
+                        .iter()
+                        .find(|(m, _)| m.is_match(dst))
+                        .map(|(_, a)| (a.uid, a.gid));
+                    trace!(
+                        "Found uid/gid attrs {:?} for dst path {}",
+                        ugid,
+                        dst.quote(),
+                    );
+                    ugid
                 })
                 .unwrap_or_default();
             if uid.is_some() || gid.is_some() || self.attrs.ownership {
@@ -169,7 +190,11 @@ impl Copier {
                     gid,
                     dst.quote()
                 );
-                nix::unistd::chown(dst, Some(uid.into()), Some(gid.into()))?;
+                if dst_meta.is_symlink() {
+                    std::os::unix::fs::lchown(dst, Some(uid), Some(gid))?;
+                } else {
+                    std::os::unix::fs::chown(dst, Some(uid), Some(gid))?;
+                }
             }
 
             if self.attrs.xattr {
@@ -188,9 +213,20 @@ impl Copier {
 
             use std::os::unix::prelude::{MetadataExt, PermissionsExt};
             let new_mode = self.glob_attrs.as_ref().and_then(|v| {
-                v.iter()
-                    .find(|(m, _)| m.is_match(src))
-                    .and_then(|(_, a)| a.mode)
+                if log_enabled!(log::Level::Trace) {
+                    trace!(
+                        "Finding mode attr by dst path {} match in {} globs: [{}]",
+                        dst.quote(),
+                        v.len(),
+                        v.iter().map(|(g, _)| g.glob().glob()).join(", ")
+                    );
+                }
+                let mode = v
+                    .iter()
+                    .find(|(m, _)| m.is_match(dst))
+                    .and_then(|(_, a)| a.mode);
+                trace!("Found mode {:?} attrs for dst path {}", mode, dst.quote(),);
+                mode
             });
             // The `chmod()` system call that underlies the
             // `fs::set_permissions()` call is unable to change the

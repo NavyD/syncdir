@@ -125,6 +125,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "caps"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "190baaad529bcfbde9e1a19022c42781bdb6ff9de25721abdb8fd98c0807730b"
+dependencies = [
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1731,9 +1741,10 @@ dependencies = [
 
 [[package]]
 name = "syncdir"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
+ "caps",
  "clap",
  "ctor",
  "derive_builder",

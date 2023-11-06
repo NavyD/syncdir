@@ -465,19 +465,37 @@ impl TestEnv {
         // assert perms
         #[cfg(unix)]
         {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
             let (src_meta, dst_meta) = (metadata(src).unwrap(), metadata(dst).unwrap());
-            if let Some(mode) = self.copier.glob_attrs().as_ref().and_then(|a| {
-                a.iter()
-                    .find(|(m, _)| m.is_match(src))
-                    .and_then(|(_, a)| a.mode)
-            }) {
-                use std::os::unix::fs::PermissionsExt;
-                let mut src_perm = src_meta.permissions();
-                src_perm.set_mode(mode);
-                assert_eq!(src_perm, dst_meta.permissions())
-            } else if self.copier.attrs().mode {
-                assert_eq!(src_meta.permissions(), dst_meta.permissions());
+            if let Some(a) = self
+                .copier
+                .glob_attrs()
+                .as_ref()
+                .and_then(|a| a.iter().find(|(m, _)| m.is_match(dst)).map(|(_, a)| a))
+            {
+                if let Some(mode) = a.mode {
+                    let mut src_perm = src_meta.permissions();
+                    src_perm.set_mode(mode);
+                    assert_eq!(src_perm, dst_meta.permissions());
+                }
+                if let Some(uid) = a.uid {
+                    assert_eq!(uid, dst_meta.uid());
+                }
+                if let Some(gid) = a.gid {
+                    assert_eq!(gid, dst_meta.gid());
+                }
+            } else {
+                let a = self.copier.attrs();
+                if a.mode {
+                    assert_eq!(src_meta.permissions(), dst_meta.permissions());
+                }
+                if a.ownership {
+                    assert_eq!(src_meta.uid(), dst_meta.uid());
+                    assert_eq!(src_meta.gid(), dst_meta.gid());
+                }
             }
+            // TODO: xattr
         }
     }
 
