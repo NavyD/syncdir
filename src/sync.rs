@@ -110,6 +110,9 @@ pub struct Syncer {
     dry_run: bool,
 
     last_dsts_srv: LastDestinationListService,
+
+    #[builder(default = "false")]
+    clear_src_empty_dirs_on_back: bool,
 }
 
 impl Syncer {
@@ -247,7 +250,10 @@ impl Syncer {
             })
             .flatten_ok()
             .collect::<Result<Vec<_>>>();
-        clean_empty_dirs(&self.src)?;
+
+        if self.clear_src_empty_dirs_on_back {
+            clean_empty_dirs(&self.src)?;
+        }
         res
     }
 
@@ -653,7 +659,10 @@ impl Syncer {
             // safety: filter some
             .map(|res| res.map(|opt| opt.unwrap()))
             .collect::<Result<Vec<_>>>();
-        clean_empty_dirs(&self.src)?;
+
+        if self.clear_src_empty_dirs_on_back {
+            clean_empty_dirs(&self.src)?;
+        }
         res
     }
 

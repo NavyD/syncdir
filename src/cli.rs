@@ -57,7 +57,10 @@ impl Opts {
             OptCommand::Apply { sub_opts } => {
                 self.apply(sub_opts)?;
             }
-            OptCommand::Sync { sub_opts } => {
+            OptCommand::Sync {
+                sub_opts,
+                clear_src_empty_dirs: _,
+            } => {
                 self.sync(sub_opts)?;
             }
             OptCommand::List => self.list()?,
@@ -230,7 +233,11 @@ impl Opts {
                 match apply.try_into() {
                     Ok(v) => v,
                     Err(e) => {
-                        if let OptCommand::Sync { sub_opts: _ } = &self.command {
+                        if let OptCommand::Sync {
+                            sub_opts: _,
+                            clear_src_empty_dirs: _,
+                        } = &self.command
+                        {
                             warn!("Ignored incorrect apply config during sync: {}", e);
                             apply_cp
                         } else {
@@ -291,6 +298,17 @@ impl Opts {
             .dry_run(sub_opts.dry_run)
             .apply_copier(apply_cp)
             .back_copier(back_cp)
+            .clear_src_empty_dirs_on_back(
+                if let OptCommand::Sync {
+                    sub_opts: _,
+                    clear_src_empty_dirs,
+                } = &self.command
+                {
+                    *clear_src_empty_dirs
+                } else {
+                    false
+                },
+            )
             .last_dsts_srv(self.build_last_dsts_srv()?)
             .build()
             .map_err(Into::into)
@@ -336,6 +354,8 @@ enum OptCommand {
     Sync {
         #[command(flatten)]
         sub_opts: SubOpts,
+        #[arg(long)]
+        clear_src_empty_dirs: bool,
     },
 
     /// 打印last dsts
