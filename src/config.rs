@@ -16,7 +16,7 @@ pub struct GlobAttributes {
     mode: Option<u32>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct CopyAttributes {
     pub mode: Option<bool>,
     pub ownership: Option<bool>,
@@ -29,6 +29,7 @@ pub struct CopyAttributes {
 pub struct CopierOpt {
     #[serde(rename = "attrs", default)]
     pub glob_attrs: IndexMap<String, GlobAttributes>,
+    #[serde(default)]
     pub copy: CopyAttributes,
 }
 
@@ -175,5 +176,15 @@ mode = false
             assert!(!a.ownership);
             assert!(a.xattr);
         }
+    }
+
+    #[test]
+    fn test_no_copy() {
+        let s = r#"
+[back.attrs."**/*"]
+user = "a"
+        "#;
+        let config = toml::from_str::<Config>(s).unwrap();
+        assert_eq!(config.back.unwrap().glob_attrs.len(), 1);
     }
 }
